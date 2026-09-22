@@ -1,0 +1,33 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and release artefacts
+build/
+dist/
+*.egg-info/
+_owner/
+_internal/
+
+# SafeGit runtime state (never commit a local policy or audit log)
+.safegit/
+audit.jsonl
+safegit.policy.json
+approvals.json
+*.lock
+
+# Local environment
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

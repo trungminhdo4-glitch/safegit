@@ -1,0 +1,20 @@
+#!/bin/sh
+# Hand-written pre-commit hook. `safegit install githooks --write` generates an
+# equivalent block; this file is for people who manage their own hooks.
+#
+# Exit code 0 = allow the commit, non-zero = block it.
+
+set -eu
+
+if ! command -v safegit >/dev/null 2>&1; then
+    echo "safegit: not installed, refusing to commit (fail-closed)" >&2
+    exit 1
+fi
+
+# A missing or broken policy must not silently allow the commit.
+if ! safegit policy validate >/dev/null 2>&1; then
+    echo "safegit: policy is invalid, refusing to commit" >&2
+    exit 1
+fi
+
+exec safegit preflight --repo "$(git rev-parse --show-toplevel)" --strict

@@ -1,0 +1,23 @@
+{
+  "schema": "safegit.policy/1",
+  "profile": "ci",
+  "enforcement": "binding",
+  "interactive": false,
+  "comment": "No human is available: an UNKNOWN denies, and a plain push to a protected branch denies. Use this for automated runs, not for an interactive session.",
+  "default_profile_denied": [
+    "git.push.plain (DENY in the ci profile)",
+    "git.other (unknown_git_operations = DENY)"
+  ],
+  "unknown_git_operations": "DENY",
+  "rules": {
+    "git.checkout.switch": "ALLOW",
+    "git.commit.plain": "ALLOW",
+    "git.merge": "ALLOW",
+    "git.non_destructive": "ALLOW",
+    "git.push.plain": "DENY",
+    "git.checkout.discard": "DENY",
+    "git.reset.hard": "DENY"
+  },
+  "protected_branches": ["main", "master", "release/*"],
+  "audit": { "enabled": false }
+}

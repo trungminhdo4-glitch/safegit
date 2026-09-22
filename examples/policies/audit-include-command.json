@@ -1,0 +1,10 @@
+{
+  "schema": "safegit.policy/1",
+  "profile": "default",
+  "comment": "WARNING: include_command=true writes the command text (which can contain sensitive arguments, paths or values) to .safegit/audit.jsonl. Use it while debugging a false positive, then turn it off and delete the log.",
+  "audit": {
+    "enabled": true,
+    "include_command": true,
+    "retention_days": 1
+  }
+}

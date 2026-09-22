@@ -1,0 +1,49 @@
+name: SafeGit command audit
+
+# Classifies a list of commands (for example the shell commands extracted from
+# an agent transcript) and fails when any of them would be blocked.
+#
+# Read-only: no repository mutation, no secrets required.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commands_file:
+        description: Path to a file with one shell command per line
+        required: true
+        default: scripts/agent-commands.txt
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --no-deps .
+
+      - name: Classify every command
+        env:
+          COMMANDS_FILE: ${{ inputs.commands_file }}
+        run: |
+          set -eu
+          findings=0
+          while IFS= read -r command; do
+            [ -z "$command" ] && continue
+            case "$command" in \#*) continue;; esac
+            verdict=$(safegit check --command "$command" --json | python -c \
+              "import json,sys; print(json.load(sys.stdin)['verdict'])")
+            printf '%-14s %s\n' "$verdict" "$command"
+            if [ "$verdict" != "ALLOW" ]; then findings=$((findings + 1)); fi
+          done < "$COMMANDS_FILE"
+          echo "non-allow verdicts: $findings"
+          [ "$findings" -eq 0 ]

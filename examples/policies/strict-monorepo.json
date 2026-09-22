@@ -1,0 +1,32 @@
+{
+  "schema": "safegit.policy/1",
+  "profile": "default",
+  "enforcement": "binding",
+  "interactive": true,
+  "comment": "Large repository with generated artefacts. The generated_paths list only affects preflight reporting; the protected paths keep tooling configuration out of the agent's reach.",
+  "protected_branches": ["main", "master", "develop", "release/*", "release-*"],
+  "protected_paths": [
+    ".git",
+    ".git/**",
+    ".safegit/**",
+    "safegit.policy.json",
+    "**/safegit.policy.json",
+    ".claude/settings.json",
+    ".opencode/**",
+    "tooling/**",
+    "infra/**"
+  ],
+  "ci_paths": [".github/workflows/**", ".gitlab-ci.yml", "buildkite/**"],
+  "commit_preflight": {
+    "enabled": true,
+    "max_files": 120,
+    "max_added_lines": 2500,
+    "max_deleted_lines": 2500,
+    "max_file_bytes": 2097152,
+    "block_conflict_markers": true,
+    "block_denied_paths": true,
+    "warn_generated_paths": true,
+    "generated_paths": ["**/dist/**", "**/build/**", "**/*.min.js", "**/*.lock", "**/generated/**"]
+  },
+  "audit": { "enabled": true, "retention_days": 60, "include_command": false }
+}

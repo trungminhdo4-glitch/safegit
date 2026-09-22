@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (python ${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install (no dependencies)
+        run: python -m pip install --no-deps .
+
+      - name: Compile check
+        run: python -m compileall -q src
+
+      - name: Rule table is up to date
+        run: |
+          python tools/build_rule_table.py
+          git diff --exit-code docs/RULES_GENERATED.md
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Built-in rule expectations
+        run: python -m safegit selftest
+
+      - name: Doctor (informational)
+        run: python -m safegit doctor --json
+
+      - name: Privacy scan of the release tree
+        run: python tools/selfcheck_no_private_data.py --path .
+
+      - name: Behavioural smoke tests
+        shell: bash
+        run: |
+          set -eu
+          fail() { echo "FAILED: $1" >&2; exit 1; }
+
+          safegit check --command "git status" || fail "clean command should be allowed"
+          safegit check --command "git reset --hard" && fail "hard reset should be denied" || true
+          safegit check --command "git push origin main" --profile strict && fail "strict push should not be allowed" || true
+
+          out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"},"cwd":"."}' | safegit hook claude; echo "rc=$?")
+          case "$out" in *rc=2*) ;; *) fail "hook did not block a hard reset" ;; esac
+
+          out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git status"},"cwd":"."}' | safegit hook claude; echo "rc=$?")
+          case "$out" in *rc=0*) ;; *) fail "hook blocked a clean command" ;; esac
+
+  lint:
+    name: style
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ruff (advisory, no config changes on failure of the tool itself)
+        run: |
+          python -m pip install --quiet ruff==0.6.9
+          ruff check src tests tools || true

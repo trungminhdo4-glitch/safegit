@@ -1,0 +1,20 @@
+{
+  "schema": "safegit.policy/1",
+  "profile": "relaxed",
+  "enforcement": "binding",
+  "interactive": true,
+  "comment": "Solo work: destructive-but-recoverable operations ask the owner instead of being denied, so one approval unblocks the specific action. Irreversible history rewrites stay denied.",
+  "rules": {
+    "git.reset.hard": "REQUIRE_OWNER",
+    "git.clean.force": "REQUIRE_OWNER",
+    "git.checkout.discard": "REQUIRE_OWNER",
+    "git.restore.worktree": "REQUIRE_OWNER",
+    "git.stash.destroy": "REQUIRE_OWNER",
+    "git.push.force": "REQUIRE_OWNER",
+    "git.history.filter": "DENY",
+    "git.history.expire": "DENY",
+    "git.hook.bypass": "DENY"
+  },
+  "approvals": { "ttl_seconds": 600, "max_uses": 1, "require_interactive": true },
+  "audit": { "enabled": true, "retention_days": 30, "include_command": false }
+}
