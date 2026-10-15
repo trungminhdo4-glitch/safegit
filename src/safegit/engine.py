@@ -232,7 +232,9 @@ class EngineContext:
 MAX_PATH_TOKENS = 200
 MAX_TOKEN_CHARS = 260
 MAX_PATH_PATTERNS = 200
-_CASE_INSENSITIVE_MATCHING = os.name == "nt"
+# Always case-insensitive (fail closed): Windows and default macOS volumes treat `.ENV` and
+# `.env` as the same file, and the same policy must not allow it on one OS but deny it on another.
+_CASE_INSENSITIVE_MATCHING = True
 
 
 def _split_parts(value: str) -> list[str]:
@@ -316,18 +318,26 @@ def _glob_segments_match_exact(path_parts: list[str], pattern_parts: list[str]) 
 
 
 def _relative_to(path: str, root: str) -> tuple[str, bool]:
+    """Relativise ``path`` against ``root``; a lexical match wins, otherwise both are resolved.
+
+    git reports the resolved toplevel, while the agent may name the same directory through an
+    alias (a symlink such as macOS ``/var`` -> ``/private/var``, or a Windows 8.3 short name
+    such as ``RUNNER~1``).  Without resolving, such a path looks outside the repository and
+    repo-relative rules (``.git/**``, ``.github/workflows/**``) never match it.
+    """
     if not root:
         return path, False
-    try:
-        candidate = os.path.normcase(os.path.abspath(path))
-        root_key = os.path.normcase(os.path.abspath(root))
-    except (OSError, ValueError):
-        return path, False
-    if candidate == root_key:
-        return ".", True
-    prefix = root_key.rstrip("\\/") + os.sep
-    if candidate.startswith(prefix):
-        return candidate[len(prefix) :], True
+    for resolve in (os.path.abspath, os.path.realpath):
+        try:
+            candidate = os.path.normcase(resolve(path))
+            root_key = os.path.normcase(resolve(root))
+        except (OSError, ValueError):
+            continue
+        if candidate == root_key:
+            return ".", True
+        prefix = root_key.rstrip("\\/") + os.sep
+        if candidate.startswith(prefix):
+            return candidate[len(prefix) :], True
     return path, False
 
 

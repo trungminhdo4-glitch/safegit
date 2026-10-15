@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from typing import Union
 
 COMMAND_TOOLS: dict[str, str] = {
     "bash": "command",
@@ -161,7 +162,8 @@ class FileAction:
         }
 
 
-Action = CommandAction | FileAction
+# typing.Union: this alias is evaluated at import time (PEP 604 needs Python 3.10).
+Action = Union[CommandAction, FileAction]
 
 
 @dataclasses.dataclass
