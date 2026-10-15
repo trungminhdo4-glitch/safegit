@@ -477,6 +477,108 @@ class EngineStateTests(unittest.TestCase):
             self.assertEqual(decision.verdict, DENY, parts)
             self.assertEqual(decision.reason_code, engine.REASON_DENY_PROTECTED_PATH, parts)
 
+    def _directory_link(self, link: str, target: str) -> str:
+        """Link ``link`` to the directory ``target``: a symlink, or a junction on Windows."""
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            if os.name != "nt":
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            import _winapi
+
+            _winapi.CreateJunction(target, link)
+        return link
+
+    def _outside_directory(self) -> str:
+        outside = os.path.join(self._tmp.name, "outside")
+        os.makedirs(os.path.join(outside, "deep"), exist_ok=True)
+        return outside
+
+    def test_strict_denies_writes_through_an_in_repo_link_that_leaves_the_repository(
+        self,
+    ) -> None:
+        outside = self._outside_directory()
+        link = self._directory_link(os.path.join(self.repo.path, "link"), outside)
+        os.makedirs(os.path.join(self.repo.path, "sub"))
+        self._directory_link(os.path.join(self.repo.path, "sub", "nested"), link)
+        ctx = self.make_context(profile="strict")
+
+        def write(path: str) -> engine.Decision:
+            return engine.evaluate("Write", {"file_path": path, "content": "x"}, ctx=ctx)
+
+        for path in (
+            os.path.join(link, "new.txt"),
+            os.path.join("link", "new.txt"),
+            os.path.join(link, "deep", "missing", "new.txt"),
+            os.path.join(self.repo.path, "sub", "nested", "new.txt"),
+            os.path.join("sub", "nested", "deep", "new.txt"),
+        ):
+            decision = write(path)
+            self.assertEqual(decision.verdict, DENY, path)
+            self.assertIn(policy_module.FS_REPO_ESCAPE_WRITE, self.rules_of(decision), path)
+        # Ordinary in-repo writes, and a link that stays inside the repository, are allowed.
+        inner = self._directory_link(
+            os.path.join(self.repo.path, "alias-src"), os.path.join(self.repo.path, "src")
+        )
+        for path in (
+            os.path.join(self.repo.path, "README.md"),
+            os.path.join("src", "new.py"),
+            os.path.join(inner, "new.py"),
+        ):
+            self.assertEqual(write(path).verdict, ALLOW, path)
+        # The documented default profile keeps fs.repo_escape_write at ALLOW, but says so.
+        default = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(link, "new.txt"), "content": "x"},
+            ctx=self.make_context(),
+        )
+        self.assertEqual(default.verdict, ALLOW)
+        self.assertIn("WRITE_OUTSIDE_REPOSITORY_NOT_GUARDED", default.limitations)
+
+    def test_allowed_repo_roots_are_checked_against_the_resolved_target(self) -> None:
+        outside = self._outside_directory()
+        shared = os.path.join(self._tmp.name, "shared")
+        os.makedirs(shared)
+        document = policy_module.default_policy_dict("strict")
+        document["allowed_repo_roots"] = [os.path.join("..", "shared")]
+        ctx = self.make_context(profile="strict")
+        ctx = engine.EngineContext(
+            cwd=ctx.cwd,
+            policy=policy_module.from_dict(document, source_path="<test>"),
+            approval_store=ctx.approval_store,
+            timeout=ctx.timeout,
+        )
+        to_shared = self._directory_link(os.path.join(self.repo.path, "shared"), shared)
+        self._directory_link(os.path.join(shared, "link"), outside)
+
+        def write(path: str) -> engine.Decision:
+            return engine.evaluate("Write", {"file_path": path, "content": "x"}, ctx=ctx)
+
+        # A link inside the repository into an allowed root stays allowed.
+        self.assertEqual(write(os.path.join(to_shared, "x.txt")).verdict, ALLOW)
+        # A further link inside the allowed root does not carry the allowance outside it.
+        for path in (
+            os.path.join(to_shared, "link", "x.txt"),
+            os.path.join(self.repo.path, "escape", "x.txt"),
+        ):
+            if not os.path.lexists(os.path.dirname(path)):
+                self._directory_link(os.path.dirname(path), outside)
+            self.assertEqual(write(path).verdict, DENY, path)
+
+    def test_strict_denies_file_symlinks_and_loops_that_leave_the_repository(self) -> None:
+        outside = self._outside_directory()
+        target = os.path.join(outside, "victim.txt")
+        file_link = self._symlink_in_repo("notes.txt", target)
+        dangling = self._symlink_in_repo("later.txt", os.path.join(outside, "missing.txt"))
+        loop = os.path.join(self.repo.path, "loop")
+        os.symlink(os.path.join(self.repo.path, "loop2"), loop)
+        os.symlink(loop, os.path.join(self.repo.path, "loop2"))
+        ctx = self.make_context(profile="strict")
+        for path in (file_link, dangling, os.path.join(loop, "x.txt")):
+            decision = engine.evaluate("Write", {"file_path": path, "content": "x"}, ctx=ctx)
+            self.assertIn(decision.verdict, (DENY, UNKNOWN), path)
+            self.assertNotEqual(decision.verdict, ALLOW, path)
+
     def _case_variant_of_repo(self) -> str:
         parent, name = os.path.split(self.repo.path)
         return os.path.join(parent, name.swapcase())

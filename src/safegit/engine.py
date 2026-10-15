@@ -22,6 +22,7 @@ import fnmatch
 import os
 import posixpath
 import re
+import stat
 from typing import Any
 
 from . import adapters, approvals, gitop, gitstate, policy as policy_module, shellparse
@@ -462,6 +463,51 @@ def _outside_git_dir(directory: str) -> str:
     return directory
 
 
+def _is_link(path: str) -> bool:
+    """True for a symlink, and on Windows for any reparse point (junctions included)."""
+    try:
+        info = os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _link_escape(ctx: EngineContext, absolute: str) -> tuple[str, str]:
+    """Return ``(repository root, resolved target)`` when a link inside a repository leads out.
+
+    ``absolute`` may sit lexically inside a repository while a symlink or junction on its way
+    (``link/new.txt`` with ``link`` -> ``/elsewhere``) puts the physical target outside.  Each
+    link along the path is checked against the repository that contains it.  The root is empty
+    when no link escapes; the resolved target is empty when the path cannot be resolved, which
+    callers must treat as outside.  This is a pre-execution check, not filesystem isolation: a
+    link created or retargeted after the decision is not seen.
+    """
+    try:
+        resolved = os.path.realpath(absolute)
+    except (OSError, ValueError):
+        resolved = ""
+    current = absolute
+    while True:
+        if _is_link(current):
+            state = _state_for(ctx, _outside_git_dir(os.path.dirname(current)))
+            if state.available and state.root:
+                try:
+                    os.stat(current)
+                    target = resolved
+                except FileNotFoundError:
+                    target = resolved  # dangling: realpath still names where it points
+                except (OSError, ValueError):
+                    target = ""  # a link loop or an unreadable link
+                if not target or not _relative_to(target, state.root)[1]:
+                    return state.root, target
+        parent = os.path.dirname(current)
+        if parent == current:
+            return "", resolved
+        current = parent
+
+
 def _push_branch(op: gitop.GitOp, state: gitstate.RepoState) -> str:
     if op.branch_hint:
         return op.branch_hint
@@ -728,12 +774,18 @@ def _evaluate_file_action(
     relative, inside = _relative_to(absolute, reporoot)
     findings: list[Finding] = []
     limitations: list[str] = []
+    escaped_root, resolved = _link_escape(ctx, absolute)
+    if escaped_root:
+        reporoot = reporoot or escaped_root
+        inside = False
     if reporoot and not inside and policy.allowed_repo_roots:
         for allowed in policy.allowed_repo_roots:
             allowed_abs = (
                 allowed if os.path.isabs(allowed) else os.path.join(reporoot, allowed)
             )
-            if _relative_to(absolute, allowed_abs)[1]:
+            if _relative_to(absolute, allowed_abs)[1] and (
+                bool(resolved) and _relative_to(resolved, allowed_abs)[1]
+            ):
                 inside = True
                 relative, _ = _relative_to(absolute, allowed_abs)
                 break
