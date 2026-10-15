@@ -177,10 +177,13 @@ printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git status"},"cwd":"."
 safegit install opencode --dir . --write
 ```
 
-This writes `.opencode/plugin/safegit.js`, a ~30-line plugin that shells out
+This writes `.opencode/plugins/safegit.js`, a small plugin that shells out
 to `safegit hook opencode` before every tool call and throws on a non-zero
-exit. Both `.opencode/plugin/` and `.opencode/plugins/` are loaded by OpenCode
-1.18.31 (measured). Note that `opencode --pure` deliberately disables plugins.
+exit. It exports both the OpenCode 2.x shape (`{ id, setup(ctx) }`) and the
+1.x `server()` hook; OpenCode 2.x ignores the old 1.x-only `.opencode/plugin/`
+layout. The installer pins `--git` to an absolute path because OpenCode's
+background service may run without git on its PATH. Note that
+`opencode --pure` deliberately disables plugins.
 
 ### git hooks
 

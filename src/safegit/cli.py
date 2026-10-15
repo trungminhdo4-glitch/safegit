@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from . import (
     policy as policy_module,
 )
 from . import preflight as preflight_module
+from .preflight import FAIL, WARN
 from . import receipt as receipt_module
 from .verdicts import (
     ALLOW,
@@ -745,7 +747,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     )
 
     claude_settings = pathlib.Path(cwd) / ".claude" / "settings.json"
-    opencode_plugin = pathlib.Path(cwd) / ".opencode" / "plugin" / "safegit.js"
+    opencode_plugin = pathlib.Path(cwd).joinpath(*OPENCODE_PLUGIN_DIR, "safegit.js")
     add(
         "claude_hook",
         "PASS" if _file_mentions(claude_settings, "safegit") else "WARN",
@@ -935,6 +937,20 @@ def _hook_command_prefix() -> str:
     return launcher
 
 
+def _sh_hook_command_prefix() -> str:
+    """Interpreter prefix for a POSIX ``sh`` hook (Git for Windows runs hooks in Git Bash).
+
+    ``sh`` treats an unquoted backslash as an escape, so a Windows path collapses to
+    ``C:Users...``.  The path is quoted and written with forward slashes, which both
+    Git Bash and Windows accept.
+    """
+    executable = sys.executable
+    if any(char in executable for char in _SHELL_METACHARACTERS):
+        raise policy_module.PolicyError("UNSAFE_INTERPRETER_PATH:%s" % executable)
+    quoted = '"%s"' % executable.replace("\\", "/")
+    return " ".join([quoted, *_python_launcher_argv()[1:]])
+
+
 def _plugin_argv_literal() -> str:
     return json.dumps(_python_launcher_argv())
 
@@ -1041,60 +1057,95 @@ def _merge_claude_settings(existing: dict[str, Any], addition: dict[str, Any]) -
 OPENCODE_PLUGIN_TEMPLATE = """// SafeGit plugin for OpenCode - thin adapter, no policy of its own.
 // Every tool call is classified by the SafeGit CLI before it runs.
 // SafeGit decides; this file only transports the decision.
+// Dual export: OpenCode 2.x calls setup(ctx); OpenCode 1.x calls server(input).
+// Fail-closed: unknown project dir, spawn error, timeout or non-zero exit => refused.
 import { spawnSync } from "node:child_process"
 
 const SAFEGIT_ARGV = process.env.SAFEGIT_CLI ? [process.env.SAFEGIT_CLI] : __SAFEGIT_ARGV__
 const SAFEGIT_PINNED_ARGS = __SAFEGIT_PINNED_ARGS__
 
-export const SafegitPlugin = async ({ directory }) => {
-  return {
-    "tool.execute.before": async (input, output) => {
-      const payload = JSON.stringify({
-        tool: input.tool,
-        sessionID: input.sessionID,
-        callID: input.callID,
-        cwd: directory,
-        args: output.args ?? {},
-      })
-      const result = spawnSync(
-        SAFEGIT_ARGV[0],
-        [...SAFEGIT_ARGV.slice(1), "hook", "opencode", "--non-interactive", ...SAFEGIT_PINNED_ARGS],
-        { input: payload, encoding: "utf8", timeout: 20000 },
-      )
-      if (result.error) {
-        throw new Error(
-          `SafeGit could not run (${result.error.message}). Refusing the tool call.`,
-        )
-      }
-      if (result.status === 0) return
-      const reason = (result.stderr || "").trim() || `SafeGit blocked this call (exit ${result.status})`
-      throw new Error(reason)
-    },
+function gate(cwd, call) {
+  if (!cwd) throw new Error("SafeGit: project directory unknown. Refusing the tool call.")
+  const payload = JSON.stringify({ ...call, cwd, args: call.args ?? {} })
+  const result = spawnSync(
+    SAFEGIT_ARGV[0],
+    [...SAFEGIT_ARGV.slice(1), "hook", "opencode", "--non-interactive", ...SAFEGIT_PINNED_ARGS],
+    { input: payload, encoding: "utf8", timeout: 20000, windowsHide: true },
+  )
+  if (result.error) {
+    throw new Error(`SafeGit could not run (${result.error.message}). Refusing the tool call.`)
   }
+  if (result.status === 0) return
+  const reason = (result.stderr || "").trim() || `SafeGit blocked this call (exit ${result.status})`
+  throw new Error(reason)
+}
+
+export default {
+  id: "safegit",
+  // OpenCode 2.x: the plugin runs in a background service whose process.cwd() is not the
+  // project, so the project comes from ctx.location. Throwing aborts the call.
+  async setup(ctx) {
+    const cwd = ctx?.location?.directory
+    await ctx.tool.hook("execute.before", (event) => {
+      gate(cwd, { tool: event.tool, sessionID: event.sessionID, callID: event.callID, args: event.input })
+    })
+  },
+  // OpenCode 1.x
+  async server({ directory }) {
+    return {
+      "tool.execute.before": async (input, output) => {
+        gate(directory, { tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args })
+      },
+    }
+  },
 }
 """
 
+OPENCODE_PLUGIN_DIR = (".opencode", "plugins")
+
+
+def _opencode_pinned_args(args: argparse.Namespace, cwd: str) -> list[str]:
+    """Pinned args plus an absolute ``--git``: OpenCode's service PATH may lack git."""
+    pinned = _pinned_args(cwd)
+    git = shutil.which(args.git)
+    if git:
+        pinned.extend(["--git", os.path.abspath(git)])
+    else:
+        sys.stderr.write(
+            "SafeGit: warning: %r not found on PATH; the plugin will rely on the PATH "
+            "OpenCode runs with (pass --git <absolute path>)\n" % args.git
+        )
+    return pinned
+
 
 def _install_opencode(args: argparse.Namespace, cwd: str) -> int:
-    plugin_dir = pathlib.Path(cwd) / ".opencode" / "plugin"
+    plugin_dir = pathlib.Path(cwd).joinpath(*OPENCODE_PLUGIN_DIR)
     target = plugin_dir / "safegit.js"
+    pinned = _opencode_pinned_args(args, cwd)
     content = OPENCODE_PLUGIN_TEMPLATE.replace("__SAFEGIT_ARGV__", _plugin_argv_literal()).replace(
-        "__SAFEGIT_PINNED_ARGS__", json.dumps(_pinned_args(cwd))
+        "__SAFEGIT_PINNED_ARGS__", json.dumps(pinned)
     )
+    legacy = pathlib.Path(cwd) / ".opencode" / "plugin" / "safegit.js"
     if not args.write:
         sys.stdout.write("SafeGit install (dry run) - OpenCode plugin\n")
         sys.stdout.write("target: %s\n" % target)
-        sys.stdout.write("pinned arguments: %s\n" % " ".join(_pinned_args(cwd)))
+        sys.stdout.write("pinned arguments: %s\n" % " ".join(pinned))
         sys.stdout.write("--- plugin content ---\n%s\n" % content)
         sys.stdout.write("Re-run with --write to apply.\n")
         return 0
     plugin_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    with open(target, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
     sys.stdout.write("wrote OpenCode plugin %s\n" % target)
     sys.stdout.write(
-        "OpenCode loads plugins from .opencode/plugin automatically; "
+        "OpenCode loads plugins from .opencode/plugins automatically; "
         "run 'opencode --pure' only if you deliberately want it off.\n"
     )
+    if legacy.is_file():
+        sys.stdout.write(
+            "note: an older SafeGit plugin exists at %s (ignored by OpenCode 2.x); "
+            "remove it yourself once the new plugin is verified.\n" % legacy
+        )
     return 0
 
 
@@ -1112,7 +1163,7 @@ def _install_githooks(args: argparse.Namespace, cwd: str) -> int:
     target = hooks_dir / "pre-commit"
     block = '%s\nexec %s preflight --repo "$(git rev-parse --show-toplevel)" --strict\n%s\n' % (
         GITHOOK_MARKER,
-        _hook_command_prefix(),
+        _sh_hook_command_prefix(),
         GITHOOK_MARKER.replace(">>>", "<<<"),
     )
     existing = ""
@@ -1138,9 +1189,9 @@ def _install_githooks(args: argparse.Namespace, cwd: str) -> int:
         return 0
     hooks_dir.mkdir(parents=True, exist_ok=True)
     prefix = existing if existing.strip() else "#!/bin/sh\n"
-    target.write_text(
-        prefix + ("\n" if not prefix.endswith("\n") else "") + block, encoding="utf-8"
-    )
+    # newline="\n": sh reads a trailing CR as part of the word, so CRLF breaks the hook.
+    with open(target, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(prefix + ("\n" if not prefix.endswith("\n") else "") + block)
     try:
         os.chmod(target, 0o755)
     except OSError:

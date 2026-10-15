@@ -348,13 +348,39 @@ class InstallTests(CliHarness):
     def test_opencode_install_writes_a_plugin_that_only_shells_out(self) -> None:
         code, _, _ = self.run_cli(["install", "opencode", "--dir", self.root, "--write"])
         self.assertEqual(code, 0)
-        plugin = pathlib.Path(self.root) / ".opencode" / "plugin" / "safegit.js"
+        # F1: OpenCode 2.x loads .opencode/plugins/ and ignores the V1-only layout.
+        plugin = pathlib.Path(self.root) / ".opencode" / "plugins" / "safegit.js"
         self.assertTrue(plugin.is_file())
+        self.assertFalse((pathlib.Path(self.root) / ".opencode" / "plugin").exists())
         content = plugin.read_text(encoding="utf-8")
+        self.assertIn("export default", content)
+        self.assertIn("setup(ctx)", content)
+        self.assertIn('ctx.tool.hook("execute.before"', content)
+        self.assertIn("ctx?.location?.directory", content)
+        self.assertIn("server({ directory })", content)
         self.assertIn("tool.execute.before", content)
         self.assertIn("hook", content)
         self.assertNotIn("reset", content)
         self.assertNotIn("push", content)
+        self.assertNotIn(b"\r", plugin.read_bytes())
+
+    def test_opencode_install_pins_an_absolute_git(self) -> None:
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git is not available")
+        code, _, err = self.run_cli(["install", "opencode", "--dir", self.root, "--write"])
+        self.assertEqual(code, 0, err)
+        content = (pathlib.Path(self.root) / ".opencode" / "plugins" / "safegit.js").read_text(
+            encoding="utf-8"
+        )
+        pinned_line = next(
+            line for line in content.splitlines() if line.startswith("const SAFEGIT_PINNED_ARGS")
+        )
+        pinned = json.loads(pinned_line.split("=", 1)[1])
+        self.assertIn("--git", pinned)
+        pinned_git = pinned[pinned.index("--git") + 1]
+        self.assertTrue(os.path.isabs(pinned_git), pinned_git)
+        self.assertEqual(os.path.normcase(pinned_git), os.path.normcase(os.path.abspath(git)))
 
     def test_githook_install_refuses_to_clobber_existing_hook(self) -> None:
         repo = os.path.join(self.root, "hookrepo")
@@ -373,6 +399,84 @@ class InstallTests(CliHarness):
         self.assertIn("refusing", err)
         self.assertIn("echo existing", hook.read_text(encoding="utf-8"))
 
+    def test_githook_is_runnable_by_sh_and_gates_a_real_commit(self) -> None:
+        # F2: an unquoted backslash path plus CRLF made Git Bash report
+        # "exec: C:Users...python.exe: not found", so every commit was refused.
+        repo = os.path.join(self.root, "hookrepo")
+        subprocess.run(
+            ["git", "init", "-b", "main", repo], capture_output=True, check=True, timeout=60
+        )
+        code, _, err = self.run_cli(["install", "githooks", "--repo", repo, "--write"])
+        self.assertEqual(code, 0, err)
+        raw = (pathlib.Path(repo) / ".git" / "hooks" / "pre-commit").read_bytes()
+        self.assertNotIn(b"\r", raw)
+        exec_line = next(line for line in raw.decode("utf-8").splitlines() if line.startswith("exec "))
+        self.assertTrue(exec_line.startswith('exec "'), exec_line)
+        self.assertNotIn("\\", exec_line)
+
+        pathlib.Path(repo, "a.txt").write_text("a\n", encoding="utf-8")
+        subprocess.run(["git", "-C", repo, "add", "a.txt"], capture_output=True, check=True, timeout=60)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1] / "src")
+        identity = ["-c", "user.name=SafeGit Test", "-c", "user.email=test@example.invalid"]
+        identity += ["-c", "core.hooksPath=.git/hooks"]  # ignore any global hooksPath
+        completed = subprocess.run(
+            ["git", "-C", repo, *identity, "commit", "-m", "hooked"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=120,
+            check=False,
+        )
+        self.assertNotIn("not found", completed.stderr)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+
+class PreflightCommandTests(CliHarness):
+    """`safegit preflight` must report findings, never crash on them (F3: NameError, exit 70)."""
+
+    def _repo_with(self, staged: str, untracked: str = "untracked.txt") -> str:
+        repo = os.path.join(self.root, "prerepo")
+        os.makedirs(repo, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-b", "main", repo], capture_output=True, check=True, timeout=60
+        )
+        target = pathlib.Path(repo, staged)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("placeholder\n", encoding="utf-8")
+        pathlib.Path(repo, untracked).write_text("untracked\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", repo, "add", "--", staged], capture_output=True, check=True, timeout=60
+        )
+        return repo
+
+    def _preflight(self, repo: str, *extra: str) -> tuple[int, dict, str]:
+        code, out, err = self.run_cli(
+            self.base("preflight", "--repo", repo, "--profile", "default", "--json", *extra)
+        )
+        self.assertNotEqual(code, 70, err)
+        self.assertNotIn("NameError", err)
+        return code, json.loads(out), err
+
+    def test_untracked_file_finding_is_reported_not_a_crash(self) -> None:
+        code, payload, _ = self._preflight(self._repo_with("staged.txt"), "--strict")
+        self.assertTrue(payload["findings"], payload)
+        self.assertEqual((code, payload["verdict"]), (0, "ALLOW"))
+
+    def test_warn_finding_under_strict_requires_the_owner(self) -> None:
+        code, payload, _ = self._preflight(
+            self._repo_with(".github/workflows/ci.yml"), "--strict"
+        )
+        self.assertIn("WARN", [finding["severity"] for finding in payload["findings"]])
+        self.assertEqual((code, payload["verdict"]), (3, "REQUIRE_OWNER"))
+
+    def test_fail_finding_is_denied(self) -> None:
+        code, payload, _ = self._preflight(self._repo_with("fixture.pem"))
+        self.assertIn("FAIL", [finding["severity"] for finding in payload["findings"]])
+        self.assertEqual((code, payload["verdict"]), (2, "DENY"))
+
 
 class NodePluginTests(unittest.TestCase):
     """The OpenCode plugin adapter logic, exercised with node directly."""
@@ -386,12 +490,10 @@ class NodePluginTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = self._tmp.name
 
-    def test_plugin_blocks_by_throwing_and_allows_by_returning(self) -> None:
-        plugin = pathlib.Path(self.root) / ".opencode" / "plugin" / "safegit.js"
-        plugin.parent.mkdir(parents=True, exist_ok=True)
-        code, _, err = self._run_install(str(plugin))
+    def _run_harness(self, mode: str) -> list[dict]:
+        code, _, err = self._run_install()
         self.assertEqual(code, 0, err)
-
+        plugin = pathlib.Path(self.root) / ".opencode" / "plugins" / "safegit.js"
         module_path = pathlib.Path(self.root) / "safegit-plugin.mjs"
         shutil.copyfile(plugin, module_path)
         harness = pathlib.Path(self.root) / "harness.mjs"
@@ -400,8 +502,23 @@ class NodePluginTests(unittest.TestCase):
                 [
                     "import { pathToFileURL } from 'node:url'",
                     "const mod = await import(pathToFileURL(process.argv[2]).href)",
-                    "const plugin = await mod.SafegitPlugin({ directory: process.argv[3] })",
-                    "const handler = plugin['tool.execute.before']",
+                    "const [directory, mode] = [process.argv[3], process.argv[4]]",
+                    "let handler",
+                    "if (mode === 'v1') {",
+                    "  const hooks = await mod.default.server({ directory })",
+                    "  const before = hooks['tool.execute.before']",
+                    "  handler = (tool, args) => before({ tool, sessionID: 's', callID: 'c' }, { args })",
+                    "} else {",
+                    "  const hooked = {}",
+                    "  const ctx = {",
+                    "    location: mode === 'v2-nodir' ? {} : { directory },",
+                    "    tool: { hook: async (name, fn) => { hooked[name] = fn } },",
+                    "  }",
+                    "  if (mod.default.id !== 'safegit') throw new Error('missing plugin id')",
+                    "  await mod.default.setup(ctx)",
+                    "  const before = hooked['execute.before']",
+                    "  handler = (tool, input) => before({ tool, sessionID: 's', callID: 'c', input })",
+                    "}",
                     "const results = []",
                     "const cases = [",
                     "  { tool: 'bash', args: { command: process.env.SG_DANGEROUS } },",
@@ -409,7 +526,7 @@ class NodePluginTests(unittest.TestCase):
                     "]",
                     "for (const item of cases) {",
                     "  try {",
-                    "    await handler({ tool: item.tool, sessionID: 's', callID: 'c' }, { args: item.args })",
+                    "    await handler(item.tool, item.args)",
                     "    results.push({ blocked: false })",
                     "  } catch (error) {",
                     "    results.push({ blocked: true, message: String(error.message).slice(0, 200) })",
@@ -425,7 +542,7 @@ class NodePluginTests(unittest.TestCase):
         env["SAFEGIT_CLI"] = ""
         env["SG_DANGEROUS"] = DANGEROUS
         completed = subprocess.run(
-            [self.node, str(harness), str(module_path), self.root],
+            [self.node, str(harness), str(module_path), self.root, mode],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -435,12 +552,25 @@ class NodePluginTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        results = json.loads(completed.stdout.strip().splitlines()[-1])
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    def _assert_blocks_dangerous_allows_status(self, results: list[dict]) -> None:
         self.assertTrue(results[0]["blocked"], results)
         self.assertIn("SafeGit", results[0]["message"])
         self.assertFalse(results[1]["blocked"], results)
 
-    def _run_install(self, plugin_path: str) -> tuple[int, str, str]:
+    def test_v2_setup_blocks_by_throwing_and_allows_by_returning(self) -> None:
+        self._assert_blocks_dangerous_allows_status(self._run_harness("v2"))
+
+    def test_v1_server_blocks_by_throwing_and_allows_by_returning(self) -> None:
+        self._assert_blocks_dangerous_allows_status(self._run_harness("v1"))
+
+    def test_v2_without_project_directory_refuses_every_call(self) -> None:
+        results = self._run_harness("v2-nodir")
+        self.assertTrue(all(result["blocked"] for result in results), results)
+        self.assertIn("project directory unknown", results[1]["message"])
+
+    def _run_install(self) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(["install", "opencode", "--dir", self.root, "--write"])
