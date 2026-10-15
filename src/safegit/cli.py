@@ -1060,6 +1060,7 @@ OPENCODE_PLUGIN_TEMPLATE = """// SafeGit plugin for OpenCode - thin adapter, no 
 // Dual export: OpenCode 2.x calls setup(ctx); OpenCode 1.x calls server(input).
 // Fail-closed: unknown project dir, spawn error, timeout or non-zero exit => refused.
 import { spawnSync } from "node:child_process"
+import path from "node:path"
 
 const SAFEGIT_ARGV = process.env.SAFEGIT_CLI ? [process.env.SAFEGIT_CLI] : __SAFEGIT_ARGV__
 const SAFEGIT_PINNED_ARGS = __SAFEGIT_PINNED_ARGS__
@@ -1080,14 +1081,36 @@ function gate(cwd, call) {
   throw new Error(reason)
 }
 
+function within(dir, root) {
+  const norm = (p) => {
+    const r = path.resolve(p)
+    return process.platform === "win32" ? r.toLowerCase() : r
+  }
+  const rel = path.relative(norm(root), norm(dir))
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+}
+
 export default {
   id: "safegit",
   // OpenCode 2.x: the plugin runs in a background service whose process.cwd() is not the
-  // project, so the project comes from ctx.location. Throwing aborts the call.
+  // project. ctx.location is where this plugin instance loaded, not necessarily where a
+  // session runs, so each call is gated in its session's directory, and only if that lies
+  // inside this instance's project (the pinned policy belongs to it). Throwing aborts the call.
   async setup(ctx) {
-    const cwd = ctx?.location?.directory
-    await ctx.tool.hook("execute.before", (event) => {
-      gate(cwd, { tool: event.tool, sessionID: event.sessionID, callID: event.callID, args: event.input })
+    const root = ctx?.location?.directory
+    await ctx.tool.hook("execute.before", async (event) => {
+      let session = null
+      try {
+        session = await ctx.session.get({ sessionID: event.sessionID })
+      } catch (err) {
+        throw new Error(`SafeGit: session lookup failed (${err?.message}). Refusing the tool call.`)
+      }
+      const cwd = session?.location?.directory
+      if (!root || !cwd) throw new Error("SafeGit: project directory unknown. Refusing the tool call.")
+      if (!within(cwd, root)) {
+        throw new Error(`SafeGit: session directory ${cwd} is outside the plugin project ${root}. Refusing the tool call.`)
+      }
+      gate(cwd, { tool: event.tool, sessionID: event.sessionID, callID: event.id, args: event.input })
     })
   },
   // OpenCode 1.x

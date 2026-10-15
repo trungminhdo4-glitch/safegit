@@ -20,6 +20,17 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.opencode/plugins/`, takes the project directory from
   `ctx.location.directory`, refuses calls when it is unknown, and pins
   `--git` to an absolute path. `doctor` checks the new location.
+* The OpenCode 2.x plugin gated every call in `ctx.location.directory`, which
+  is the plugin instance's location, not the session's. It now gates each call
+  in its session's directory (`ctx.session.get`) and refuses calls from a
+  session outside the plugin's project or whose session cannot be looked up.
+* A shell tool's `workdir` (OpenCode) was ignored, and an explicit
+  `working_directory` was shadowed by the hook's own `cwd`, so a command run
+  in another repository was judged against the session's repository (e.g.
+  `git checkout -- f` allowed in a clean repo while discarding work in a dirty
+  one). Relative action directories are anchored at the event `cwd`.
+* `test_owner_required_exit_code_is_three` depended on the directory the suite
+  was started from; it now pins `--cwd` to its temporary directory.
 
 ## 0.1.0 - release candidate
 

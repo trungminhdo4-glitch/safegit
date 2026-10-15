@@ -132,6 +132,40 @@ class HookProtocolTests(CliHarness):
         code, _, err = self.run_cli(self.base("hook", "opencode"), json.dumps(event))
         self.assertEqual(code, 0)
 
+    def test_opencode_workdir_is_judged_in_the_repo_it_runs_in(self) -> None:
+        # OpenCode's shell tool takes `workdir`; judging it in the session's (clean) repo
+        # allowed discarding uncommitted work in another repo.
+        def repo(name: str, dirty: bool) -> str:
+            path = os.path.join(self.root, name)
+            identity = ["-c", "user.name=SafeGit Test", "-c", "user.email=test@example.invalid"]
+            identity += ["-c", "core.hooksPath=.git/hooks"]  # ignore any global hooksPath
+            subprocess.run(["git", "init", "-b", "main", path], capture_output=True, check=True, timeout=60)
+            pathlib.Path(path, "f.txt").write_text("one\n", encoding="utf-8")
+            subprocess.run(["git", "-C", path, "add", "f.txt"], capture_output=True, check=True, timeout=60)
+            subprocess.run(
+                ["git", "-C", path, *identity, "commit", "-m", "init"],
+                capture_output=True, check=True, timeout=60,
+            )
+            if dirty:
+                pathlib.Path(path, "f.txt").write_text("one\nlocal work\n", encoding="utf-8")
+            return path
+
+        clean, dirty = repo("clean", False), repo("dirty", True)
+        for workdir in (dirty, os.path.join("..", "dirty")):
+            event = {
+                "tool": "shell",
+                "cwd": clean,
+                "args": {"command": "git checkout -- f.txt", "workdir": workdir},
+            }
+            code, _, err = self.run_cli(self.base("hook", "opencode"), json.dumps(event))
+            self.assertEqual(code, 2, (workdir, err))
+        event = {"tool": "shell", "cwd": clean, "args": {"command": "git checkout -- f.txt"}}
+        code, _, err = self.run_cli(self.base("hook", "opencode"), json.dumps(event))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            pathlib.Path(dirty, "f.txt").read_text(encoding="utf-8"), "one\nlocal work\n"
+        )
+
 
 class CheckCommandTests(CliHarness):
     def test_allow_exit_code_is_zero(self) -> None:
@@ -146,7 +180,8 @@ class CheckCommandTests(CliHarness):
 
     def test_owner_required_exit_code_is_three(self) -> None:
         code, out, _ = self.run_cli(
-            self.base("check", "--command", "git commit --" + "amend -m x", "--json")
+            # Neutral cwd: inside a checkout with a published HEAD, amend correctly escalates to DENY.
+            self.base("check", "--command", "git commit --" + "amend -m x", "--cwd", self.root, "--json")
         )
         self.assertEqual(code, 3)
         self.assertEqual(json.loads(out)["verdict"], "REQUIRE_OWNER")
@@ -357,6 +392,7 @@ class InstallTests(CliHarness):
         self.assertIn("setup(ctx)", content)
         self.assertIn('ctx.tool.hook("execute.before"', content)
         self.assertIn("ctx?.location?.directory", content)
+        self.assertIn("ctx.session.get", content)
         self.assertIn("server({ directory })", content)
         self.assertIn("tool.execute.before", content)
         self.assertIn("hook", content)
@@ -489,6 +525,9 @@ class NodePluginTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="safegit-node-")
         self.addCleanup(self._tmp.cleanup)
         self.root = self._tmp.name
+        self._outside = tempfile.TemporaryDirectory(prefix="safegit-node-other-")
+        self.addCleanup(self._outside.cleanup)
+        self.outside = self._outside.name
 
     def _run_harness(self, mode: str) -> list[dict]:
         code, _, err = self._run_install()
@@ -513,11 +552,16 @@ class NodePluginTests(unittest.TestCase):
                     "  const ctx = {",
                     "    location: mode === 'v2-nodir' ? {} : { directory },",
                     "    tool: { hook: async (name, fn) => { hooked[name] = fn } },",
+                    "    session: { get: async ({ sessionID }) => {",
+                    "      if (mode === 'v2-nosession') throw new Error('no such session')",
+                    "      const dir = mode === 'v2-outside' ? process.argv[5] : directory",
+                    "      return { id: sessionID, location: { directory: dir } }",
+                    "    } },",
                     "  }",
                     "  if (mod.default.id !== 'safegit') throw new Error('missing plugin id')",
                     "  await mod.default.setup(ctx)",
                     "  const before = hooked['execute.before']",
-                    "  handler = (tool, input) => before({ tool, sessionID: 's', callID: 'c', input })",
+                    "  handler = (tool, input) => before({ tool, sessionID: 's', id: 'c', input })",
                     "}",
                     "const results = []",
                     "const cases = [",
@@ -542,7 +586,7 @@ class NodePluginTests(unittest.TestCase):
         env["SAFEGIT_CLI"] = ""
         env["SG_DANGEROUS"] = DANGEROUS
         completed = subprocess.run(
-            [self.node, str(harness), str(module_path), self.root, mode],
+            [self.node, str(harness), str(module_path), self.root, mode, self.outside],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -569,6 +613,18 @@ class NodePluginTests(unittest.TestCase):
         results = self._run_harness("v2-nodir")
         self.assertTrue(all(result["blocked"] for result in results), results)
         self.assertIn("project directory unknown", results[1]["message"])
+
+    def test_v2_session_outside_the_plugin_project_refuses_every_call(self) -> None:
+        # ctx.location is the plugin instance's location, not every session's; a session
+        # elsewhere must not be gated with this project's pinned policy.
+        results = self._run_harness("v2-outside")
+        self.assertTrue(all(result["blocked"] for result in results), results)
+        self.assertIn("outside the plugin project", results[1]["message"])
+
+    def test_v2_session_lookup_failure_refuses_every_call(self) -> None:
+        results = self._run_harness("v2-nosession")
+        self.assertTrue(all(result["blocked"] for result in results), results)
+        self.assertIn("session lookup failed", results[1]["message"])
 
     def _run_install(self) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
