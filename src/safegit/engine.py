@@ -341,6 +341,69 @@ def _relative_to(path: str, root: str) -> tuple[str, bool]:
     return path, False
 
 
+def _path_views(
+    absolute: str, relative: str, root: str
+) -> list[tuple[str, str]]:
+    """Return every ``(relative, absolute)`` spelling of a target that policy globs must see.
+
+    The lexical spelling comes first.  The resolved spellings follow: ``realpath`` sees through
+    a symlink inside the repository (``link/config`` with ``link`` -> ``.git``), and a walk over
+    the resolved ancestors finds the repository root by file identity, which also covers a
+    case-variant spelling of the root on a case-insensitive volume that ``realpath`` leaves
+    as written.  File identity never folds case itself, so a case-sensitive volume is unaffected.
+    Callers deny when any view matches; the views never decide whether a target is inside the
+    repository.
+    """
+    views = [(relative, absolute)]
+    try:
+        resolved = os.path.realpath(absolute)
+    except (OSError, ValueError):
+        return views
+    resolved_relative, _ = _relative_to(resolved, root)
+    views.append((resolved_relative, resolved))
+    if not root:
+        return views
+    try:
+        root_stat = os.stat(root)
+    except (OSError, ValueError):
+        return views
+    if not root_stat.st_ino:
+        # No file identity on this volume (some FAT/network mounts): every directory would match.
+        return views
+    current = resolved
+    tail: list[str] = []
+    while True:
+        try:
+            if os.path.samestat(os.stat(current), root_stat):
+                views.append((os.path.join(*reversed(tail)) if tail else ".", resolved))
+                break
+        except (OSError, ValueError):
+            pass
+        parent, name = os.path.split(current)
+        if parent == current:
+            break
+        tail.append(name)
+        current = parent
+    return views
+
+
+def _views_match(views: list[tuple[str, str]], patterns: Any) -> bool:
+    return any(
+        _match_glob(relative, absolute, pattern)
+        for relative, absolute in views
+        for pattern in patterns
+    )
+
+
+def _views_match_secret(views: list[tuple[str, str]], patterns: Any) -> bool:
+    """A view is a secret unless that same view is allowlisted (a symlinked template is not)."""
+    return any(
+        not _views_match([view], policy_module.SECRET_PATH_ALLOWLIST)
+        and _views_match([view], patterns)
+        for view in views
+    )
+
+
 def _state_for(ctx: EngineContext, directory: str) -> gitstate.RepoState:
     return gitstate.probe(
         directory,
@@ -367,12 +430,36 @@ def _state_for_path(ctx: EngineContext, path: str) -> gitstate.RepoState:
         if parent == candidate:
             break
         candidate = parent
-    while candidate and os.path.basename(candidate).lower() == ".git":
-        parent = os.path.dirname(candidate)
-        if parent == candidate:
-            break
-        candidate = parent
+    candidate = _outside_git_dir(candidate)
     return _state_for(ctx, candidate or ctx.cwd)
+
+
+def _outside_git_dir(directory: str) -> str:
+    """Cut ``directory`` at its first ``.git`` component, lexical or resolved.
+
+    git finds no toplevel from ``.git/hooks``, nor from an in-repo symlink to ``.git``; the
+    repository root would then be empty and repo-relative rules such as ``.git/**`` never match.
+    """
+    if not directory:
+        return directory
+    spellings = [directory]
+    try:
+        spellings.append(os.path.realpath(directory))
+    except (OSError, ValueError):
+        pass
+    for spelling in spellings:
+        current = spelling
+        cut = ""
+        while True:
+            parent, name = os.path.split(current)
+            if name.lower() == ".git":
+                cut = parent
+            if not name or parent == current:
+                break
+            current = parent
+        if cut:
+            return cut
+    return directory
 
 
 def _push_branch(op: gitop.GitOp, state: gitstate.RepoState) -> str:
@@ -580,13 +667,8 @@ def _evaluate_path_findings(
     for token in tokens:
         absolute = token if os.path.isabs(token) else os.path.join(ctx.cwd, token)
         relative, inside = _relative_to(absolute, reporoot)
-        secret_allowlisted = any(
-            _match_glob(relative, absolute, pattern)
-            for pattern in policy_module.SECRET_PATH_ALLOWLIST
-        )
-        if not secret_allowlisted and any(
-            _match_glob(relative, absolute, pattern) for pattern in policy.secret_paths
-        ):
+        views = _path_views(absolute, relative, reporoot)
+        if _views_match_secret(views, policy.secret_paths):
             if writes:
                 findings.append(
                     Finding(
@@ -600,7 +682,7 @@ def _evaluate_path_findings(
                     )
                 )
             continue
-        if any(_match_glob(relative, absolute, pattern) for pattern in policy.ci_paths):
+        if _views_match(views, policy.ci_paths):
             if writes:
                 findings.append(
                     Finding(
@@ -613,10 +695,7 @@ def _evaluate_path_findings(
                     )
                 )
             continue
-        if any(
-            _match_glob(relative, absolute, pattern)
-            for pattern in policy.protected_paths
-        ):
+        if _views_match(views, policy.protected_paths):
             if writes:
                 findings.append(
                     Finding(
@@ -675,13 +754,8 @@ def _evaluate_file_action(
         )
         return findings, limitations
 
-    secret_allowlisted = any(
-        _match_glob(relative, absolute, pattern)
-        for pattern in policy_module.SECRET_PATH_ALLOWLIST
-    )
-    if not secret_allowlisted and any(
-        _match_glob(relative, absolute, pattern) for pattern in policy.secret_paths
-    ):
+    views = _path_views(absolute, relative, reporoot)
+    if _views_match_secret(views, policy.secret_paths):
         findings.append(
             Finding(
                 rule_id=policy_module.FS_SECRET_WRITE,
@@ -695,7 +769,7 @@ def _evaluate_file_action(
             )
         )
         return findings, limitations
-    if any(_match_glob(relative, absolute, pattern) for pattern in policy.ci_paths):
+    if _views_match(views, policy.ci_paths):
         findings.append(
             Finding(
                 rule_id=policy_module.FS_CI_WRITE,
@@ -708,9 +782,7 @@ def _evaluate_file_action(
             )
         )
         return findings, limitations
-    if any(
-        _match_glob(relative, absolute, pattern) for pattern in policy.protected_paths
-    ):
+    if _views_match(views, policy.protected_paths):
         findings.append(
             Finding(
                 rule_id=policy_module.FS_PROTECTED_WRITE,

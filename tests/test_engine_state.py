@@ -425,6 +425,95 @@ class EngineStateTests(unittest.TestCase):
         )
         self.assertEqual(decision.verdict, ALLOW)
 
+    def _symlink_in_repo(self, name: str, target: str) -> str:
+        link = os.path.join(self.repo.path, name)
+        try:
+            os.symlink(
+                target, link, target_is_directory=os.path.isdir(target)
+            )
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("cannot create symlinks here: %s" % exc)
+        return link
+
+    def test_protected_paths_hold_through_a_symlink_inside_the_repository(self) -> None:
+        git_link = self._symlink_in_repo("link", os.path.join(self.repo.path, ".git"))
+        self.repo.write(".github/workflows/ci.yml", "on: push\n")
+        ci_link = self._symlink_in_repo(
+            "pipelines", os.path.join(self.repo.path, ".github", "workflows")
+        )
+        self.repo.write(".env", "TOKEN=x\n")
+        env_link = self._symlink_in_repo(
+            "settings.example", os.path.join(self.repo.path, ".env")
+        )
+        ctx = self.make_context()
+
+        def write(path: str) -> engine.Decision:
+            return engine.evaluate(
+                "Write", {"file_path": path, "content": "x"}, ctx=ctx
+            )
+
+        protected = write(os.path.join(git_link, "config"))
+        self.assertEqual(protected.verdict, DENY)
+        self.assertEqual(protected.reason_code, engine.REASON_DENY_PROTECTED_PATH)
+        self.assertEqual(write(os.path.join(git_link, "hooks", "pre-commit")).verdict, DENY)
+        self.assertEqual(write(os.path.join(ci_link, "ci.yml")).verdict, REQUIRE_OWNER)
+        # The lexical name looks like an allowlisted template; the resolved target is a secret.
+        secret = write(env_link)
+        self.assertEqual(secret.verdict, DENY)
+        self.assertEqual(secret.reason_code, engine.REASON_DENY_SECRET_PATH)
+        shell = self.decide("echo x > %s" % os.path.join("link", "config"))
+        self.assertEqual(shell.verdict, DENY)
+        # An ordinary in-repo write next to the links is unaffected.
+        self.assertEqual(write(os.path.join(self.repo.path, "src", "app.py")).verdict, ALLOW)
+
+    def test_writes_below_git_subdirectories_are_protected(self) -> None:
+        # git finds no toplevel from inside .git/hooks; the repository root must still be found.
+        for parts in (("hooks", "pre-commit"), ("hooks", "pre-commit.sample"), ("info", "x")):
+            decision = engine.evaluate(
+                "Write",
+                {"file_path": os.path.join(self.repo.path, ".git", *parts), "content": "x"},
+                ctx=self.make_context(),
+            )
+            self.assertEqual(decision.verdict, DENY, parts)
+            self.assertEqual(decision.reason_code, engine.REASON_DENY_PROTECTED_PATH, parts)
+
+    def _case_variant_of_repo(self) -> str:
+        parent, name = os.path.split(self.repo.path)
+        return os.path.join(parent, name.swapcase())
+
+    def test_protected_paths_hold_through_a_case_variant_repository_root(self) -> None:
+        variant = self._case_variant_of_repo()
+        if not os.path.isdir(variant):
+            self.skipTest("the temporary directory is on a case-sensitive volume")
+        decision = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(variant, ".git", "config"), "content": "x"},
+            ctx=self.make_context(cwd=variant),
+        )
+        self.assertEqual(decision.verdict, DENY)
+        self.assertEqual(decision.reason_code, engine.REASON_DENY_PROTECTED_PATH)
+        ci = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(variant, ".github", "workflows", "ci.yml")},
+            ctx=self.make_context(cwd=variant),
+        )
+        self.assertEqual(ci.verdict, REQUIRE_OWNER)
+
+    def test_case_variant_directory_on_a_case_sensitive_volume_stays_outside(
+        self,
+    ) -> None:
+        variant = self._case_variant_of_repo()
+        if os.path.isdir(variant):
+            self.skipTest("the temporary directory is on a case-insensitive volume")
+        os.makedirs(variant)
+        target = os.path.join(variant, "README.md")
+        root = gitstate.probe(self.repo.path, timeout=15.0).root
+        relative, inside = engine._relative_to(target, root)
+        self.assertFalse(inside)
+        # A distinct directory that differs only in case is not the repository by identity.
+        for view_relative, _ in engine._path_views(target, relative, root):
+            self.assertTrue(os.path.isabs(view_relative), view_relative)
+
     def test_case_variants_of_policy_paths_are_matched_on_every_os(self) -> None:
         def verdict(*parts: str) -> str:
             return engine.evaluate(
