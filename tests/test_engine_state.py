@@ -385,6 +385,251 @@ class EngineStateTests(unittest.TestCase):
         )
         self.assertEqual(decision.verdict, REQUIRE_OWNER)
 
+    def _repo_alias(self) -> str:
+        """Return another name for the repository directory (symlink, or Windows 8.3 short name)."""
+        if os.name == "nt":
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(1024)
+            if not ctypes.windll.kernel32.GetShortPathNameW(self.repo.path, buffer, 1024):
+                self.skipTest("GetShortPathNameW failed")
+            if os.path.normcase(buffer.value) == os.path.normcase(self.repo.path):
+                self.skipTest("8.3 short names are disabled on this volume")
+            return buffer.value
+        alias = os.path.join(self._tmp.name, "repo-alias")
+        os.symlink(self.repo.path, alias)
+        return alias
+
+    def test_protected_paths_hold_through_a_repository_alias(self) -> None:
+        alias = self._repo_alias()
+        protected = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(alias, ".git", "config"), "content": "x"},
+            ctx=self.make_context(cwd=alias),
+        )
+        self.assertEqual(protected.verdict, DENY)
+        self.assertEqual(protected.reason_code, engine.REASON_DENY_PROTECTED_PATH)
+        ci = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(alias, ".github", "workflows", "ci.yml")},
+            ctx=self.make_context(cwd=alias),
+        )
+        self.assertEqual(ci.verdict, REQUIRE_OWNER)
+
+    def test_repository_alias_is_not_a_repo_escape(self) -> None:
+        alias = self._repo_alias()
+        decision = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(alias, "README.md"), "content": "x"},
+            ctx=self.make_context(profile="strict", cwd=alias),
+        )
+        self.assertEqual(decision.verdict, ALLOW)
+
+    def _symlink_in_repo(self, name: str, target: str) -> str:
+        link = os.path.join(self.repo.path, name)
+        try:
+            os.symlink(
+                target, link, target_is_directory=os.path.isdir(target)
+            )
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("cannot create symlinks here: %s" % exc)
+        return link
+
+    def test_protected_paths_hold_through_a_symlink_inside_the_repository(self) -> None:
+        git_link = self._symlink_in_repo("link", os.path.join(self.repo.path, ".git"))
+        self.repo.write(".github/workflows/ci.yml", "on: push\n")
+        ci_link = self._symlink_in_repo(
+            "pipelines", os.path.join(self.repo.path, ".github", "workflows")
+        )
+        self.repo.write(".env", "TOKEN=x\n")
+        env_link = self._symlink_in_repo(
+            "settings.example", os.path.join(self.repo.path, ".env")
+        )
+        ctx = self.make_context()
+
+        def write(path: str) -> engine.Decision:
+            return engine.evaluate(
+                "Write", {"file_path": path, "content": "x"}, ctx=ctx
+            )
+
+        protected = write(os.path.join(git_link, "config"))
+        self.assertEqual(protected.verdict, DENY)
+        self.assertEqual(protected.reason_code, engine.REASON_DENY_PROTECTED_PATH)
+        self.assertEqual(write(os.path.join(git_link, "hooks", "pre-commit")).verdict, DENY)
+        self.assertEqual(write(os.path.join(ci_link, "ci.yml")).verdict, REQUIRE_OWNER)
+        # The lexical name looks like an allowlisted template; the resolved target is a secret.
+        secret = write(env_link)
+        self.assertEqual(secret.verdict, DENY)
+        self.assertEqual(secret.reason_code, engine.REASON_DENY_SECRET_PATH)
+        shell = self.decide("echo x > %s" % os.path.join("link", "config"))
+        self.assertEqual(shell.verdict, DENY)
+        # An ordinary in-repo write next to the links is unaffected.
+        self.assertEqual(write(os.path.join(self.repo.path, "src", "app.py")).verdict, ALLOW)
+
+    def test_writes_below_git_subdirectories_are_protected(self) -> None:
+        # git finds no toplevel from inside .git/hooks; the repository root must still be found.
+        for parts in (("hooks", "pre-commit"), ("hooks", "pre-commit.sample"), ("info", "x")):
+            decision = engine.evaluate(
+                "Write",
+                {"file_path": os.path.join(self.repo.path, ".git", *parts), "content": "x"},
+                ctx=self.make_context(),
+            )
+            self.assertEqual(decision.verdict, DENY, parts)
+            self.assertEqual(decision.reason_code, engine.REASON_DENY_PROTECTED_PATH, parts)
+
+    def _directory_link(self, link: str, target: str) -> str:
+        """Link ``link`` to the directory ``target``: a symlink, or a junction on Windows."""
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            if os.name != "nt":
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            import _winapi
+
+            _winapi.CreateJunction(target, link)
+        return link
+
+    def _outside_directory(self) -> str:
+        outside = os.path.join(self._tmp.name, "outside")
+        os.makedirs(os.path.join(outside, "deep"), exist_ok=True)
+        return outside
+
+    def test_strict_denies_writes_through_an_in_repo_link_that_leaves_the_repository(
+        self,
+    ) -> None:
+        outside = self._outside_directory()
+        link = self._directory_link(os.path.join(self.repo.path, "link"), outside)
+        os.makedirs(os.path.join(self.repo.path, "sub"))
+        self._directory_link(os.path.join(self.repo.path, "sub", "nested"), link)
+        ctx = self.make_context(profile="strict")
+
+        def write(path: str) -> engine.Decision:
+            return engine.evaluate("Write", {"file_path": path, "content": "x"}, ctx=ctx)
+
+        for path in (
+            os.path.join(link, "new.txt"),
+            os.path.join("link", "new.txt"),
+            os.path.join(link, "deep", "missing", "new.txt"),
+            os.path.join(self.repo.path, "sub", "nested", "new.txt"),
+            os.path.join("sub", "nested", "deep", "new.txt"),
+        ):
+            decision = write(path)
+            self.assertEqual(decision.verdict, DENY, path)
+            self.assertIn(policy_module.FS_REPO_ESCAPE_WRITE, self.rules_of(decision), path)
+        # Ordinary in-repo writes, and a link that stays inside the repository, are allowed.
+        inner = self._directory_link(
+            os.path.join(self.repo.path, "alias-src"), os.path.join(self.repo.path, "src")
+        )
+        for path in (
+            os.path.join(self.repo.path, "README.md"),
+            os.path.join("src", "new.py"),
+            os.path.join(inner, "new.py"),
+        ):
+            self.assertEqual(write(path).verdict, ALLOW, path)
+        # The documented default profile keeps fs.repo_escape_write at ALLOW, but says so.
+        default = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(link, "new.txt"), "content": "x"},
+            ctx=self.make_context(),
+        )
+        self.assertEqual(default.verdict, ALLOW)
+        self.assertIn("WRITE_OUTSIDE_REPOSITORY_NOT_GUARDED", default.limitations)
+
+    def test_allowed_repo_roots_are_checked_against_the_resolved_target(self) -> None:
+        outside = self._outside_directory()
+        shared = os.path.join(self._tmp.name, "shared")
+        os.makedirs(shared)
+        document = policy_module.default_policy_dict("strict")
+        document["allowed_repo_roots"] = [os.path.join("..", "shared")]
+        ctx = self.make_context(profile="strict")
+        ctx = engine.EngineContext(
+            cwd=ctx.cwd,
+            policy=policy_module.from_dict(document, source_path="<test>"),
+            approval_store=ctx.approval_store,
+            timeout=ctx.timeout,
+        )
+        to_shared = self._directory_link(os.path.join(self.repo.path, "shared"), shared)
+        self._directory_link(os.path.join(shared, "link"), outside)
+
+        def write(path: str) -> engine.Decision:
+            return engine.evaluate("Write", {"file_path": path, "content": "x"}, ctx=ctx)
+
+        # A link inside the repository into an allowed root stays allowed.
+        self.assertEqual(write(os.path.join(to_shared, "x.txt")).verdict, ALLOW)
+        # A further link inside the allowed root does not carry the allowance outside it.
+        for path in (
+            os.path.join(to_shared, "link", "x.txt"),
+            os.path.join(self.repo.path, "escape", "x.txt"),
+        ):
+            if not os.path.lexists(os.path.dirname(path)):
+                self._directory_link(os.path.dirname(path), outside)
+            self.assertEqual(write(path).verdict, DENY, path)
+
+    def test_strict_denies_file_symlinks_and_loops_that_leave_the_repository(self) -> None:
+        outside = self._outside_directory()
+        target = os.path.join(outside, "victim.txt")
+        file_link = self._symlink_in_repo("notes.txt", target)
+        dangling = self._symlink_in_repo("later.txt", os.path.join(outside, "missing.txt"))
+        loop = os.path.join(self.repo.path, "loop")
+        os.symlink(os.path.join(self.repo.path, "loop2"), loop)
+        os.symlink(loop, os.path.join(self.repo.path, "loop2"))
+        ctx = self.make_context(profile="strict")
+        for path in (file_link, dangling, os.path.join(loop, "x.txt")):
+            decision = engine.evaluate("Write", {"file_path": path, "content": "x"}, ctx=ctx)
+            self.assertIn(decision.verdict, (DENY, UNKNOWN), path)
+            self.assertNotEqual(decision.verdict, ALLOW, path)
+
+    def _case_variant_of_repo(self) -> str:
+        parent, name = os.path.split(self.repo.path)
+        return os.path.join(parent, name.swapcase())
+
+    def test_protected_paths_hold_through_a_case_variant_repository_root(self) -> None:
+        variant = self._case_variant_of_repo()
+        if not os.path.isdir(variant):
+            self.skipTest("the temporary directory is on a case-sensitive volume")
+        decision = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(variant, ".git", "config"), "content": "x"},
+            ctx=self.make_context(cwd=variant),
+        )
+        self.assertEqual(decision.verdict, DENY)
+        self.assertEqual(decision.reason_code, engine.REASON_DENY_PROTECTED_PATH)
+        ci = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(variant, ".github", "workflows", "ci.yml")},
+            ctx=self.make_context(cwd=variant),
+        )
+        self.assertEqual(ci.verdict, REQUIRE_OWNER)
+
+    def test_case_variant_directory_on_a_case_sensitive_volume_stays_outside(
+        self,
+    ) -> None:
+        variant = self._case_variant_of_repo()
+        if os.path.isdir(variant):
+            self.skipTest("the temporary directory is on a case-insensitive volume")
+        os.makedirs(variant)
+        target = os.path.join(variant, "README.md")
+        root = gitstate.probe(self.repo.path, timeout=15.0).root
+        relative, inside = engine._relative_to(target, root)
+        self.assertFalse(inside)
+        # A distinct directory that differs only in case is not the repository by identity.
+        for view_relative, _ in engine._path_views(target, relative, root):
+            self.assertTrue(os.path.isabs(view_relative), view_relative)
+
+    def test_case_variants_of_policy_paths_are_matched_on_every_os(self) -> None:
+        def verdict(*parts: str) -> str:
+            return engine.evaluate(
+                "Write",
+                {"file_path": os.path.join(self.repo.path, *parts), "content": "x"},
+                ctx=self.make_context(),
+            ).verdict
+
+        self.assertEqual(verdict(".GIT", "config"), DENY)
+        self.assertEqual(verdict(".GitHub", "Workflows", "ci.yml"), REQUIRE_OWNER)
+        self.assertEqual(verdict(".Env.Local"), DENY)
+        # Case folding widens deny matches only: the template allowlist still covers templates.
+        self.assertEqual(verdict(".Env.Example"), ALLOW)
+
     def test_read_only_tool_is_out_of_scope_and_allowed(self) -> None:
         decision = engine.evaluate(
             "Read", {"file_path": "anything.txt"}, ctx=self.make_context()
