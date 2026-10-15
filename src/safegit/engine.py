@@ -342,6 +342,14 @@ def _relative_to(path: str, root: str) -> tuple[str, bool]:
     return path, False
 
 
+def _action_dir(ctx: EngineContext, directory: str) -> str:
+    """Directory an action runs in; a relative one is anchored at the event cwd, never at
+    SafeGit's own process cwd (a hook host may start SafeGit from anywhere)."""
+    if not directory:
+        return ctx.cwd
+    return directory if os.path.isabs(directory) else os.path.join(ctx.cwd, directory)
+
+
 def _path_views(
     absolute: str, relative: str, root: str
 ) -> list[tuple[str, str]]:
@@ -767,7 +775,7 @@ def _evaluate_file_action(
     absolute = (
         action.path
         if os.path.isabs(action.path)
-        else os.path.join(action.cwd or ctx.cwd, action.path)
+        else os.path.join(_action_dir(ctx, action.cwd), action.path)
     )
     state = _state_for_path(ctx, absolute)
     reporoot = state.root if state.available else ""
@@ -1260,7 +1268,7 @@ def evaluate(
             continue
 
         parsed = shellparse.parse(action.command)
-        state = _state_for(ctx, action.cwd or ctx.cwd)
+        state = _state_for(ctx, _action_dir(ctx, action.cwd))
         evidence["repo"] = state.to_dict()
         if parsed.unknown_reasons:
             limitations.extend(parsed.unknown_reasons)
@@ -1291,7 +1299,7 @@ def evaluate(
             continue
 
         for invocation in invocations:
-            invocation_dir = action.cwd or ctx.cwd
+            invocation_dir = _action_dir(ctx, action.cwd)
             if invocation.cwd_hint:
                 hint = invocation.cwd_hint
                 invocation_dir = (

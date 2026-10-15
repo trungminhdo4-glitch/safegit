@@ -214,7 +214,11 @@ def normalize(
     """Translate one tool call into SafeGit actions."""
     args = dict(tool_args or {})
     key = _key(tool_name)
-    event_cwd = _first_str(args, "cwd", "working_directory", "workingDirectory") or cwd
+    # "workdir": OpenCode's shell tool runs the command there, not in the session directory.
+    # Tool-specific keys come before "cwd", which the hook fills in with the session directory.
+    event_cwd = (
+        _first_str(args, "workdir", "working_directory", "workingDirectory", "cwd") or cwd
+    )
     limitations: list[str] = []
 
     if key in COMMAND_TOOLS:

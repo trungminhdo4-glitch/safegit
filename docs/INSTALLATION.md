@@ -121,9 +121,12 @@ does not verify the timeout, so check the settings file if you changed it.
 safegit install opencode --dir . --write
 ```
 
-Writes `.opencode/plugin/safegit.js`. OpenCode loads plugins from
-`.opencode/plugin/` and `.opencode/plugins/` automatically (verified on
-1.18.31). The plugin shells out to `safegit hook opencode` and **throws** on a
+Writes `.opencode/plugins/safegit.js`, a dual-export plugin: OpenCode 2.x
+calls `setup(ctx)` (hook `execute.before`, project directory from
+`ctx.location.directory`), OpenCode 1.x calls `server()` (hook
+`tool.execute.before`). OpenCode 2.x does not load the 1.x-only
+`.opencode/plugin/` file older SafeGit versions wrote; remove that file after
+reinstalling. `--git` is pinned to an absolute path at install time. The plugin shells out to `safegit hook opencode` and **throws** on a
 blocked call or on a spawn failure, so it fails closed.
 
 Notes:

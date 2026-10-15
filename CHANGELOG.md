@@ -6,6 +6,32 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+* `safegit preflight` crashed with `NameError: name 'FAIL' is not defined`
+  (exit 70) whenever there was any finding, so the pre-commit gate refused
+  every such commit. `FAIL`/`WARN` are now imported in `cli.py`.
+* `install githooks` wrote an unquoted backslash interpreter path with CRLF
+  line endings, which Git Bash cannot run (`exec: C:Users...: not found`).
+  The hook now quotes a forward-slash path and is written with LF.
+* `install opencode` wrote a 1.x-only plugin to `.opencode/plugin/` that
+  OpenCode 2.x ignores, so guarded commands ran unchecked. It now writes a
+  dual-export plugin (2.x `setup(ctx)` + 1.x `server()`) to
+  `.opencode/plugins/`, takes the project directory from
+  `ctx.location.directory`, refuses calls when it is unknown, and pins
+  `--git` to an absolute path. `doctor` checks the new location.
+* The OpenCode 2.x plugin gated every call in `ctx.location.directory`, which
+  is the plugin instance's location, not the session's. It now gates each call
+  in its session's directory (`ctx.session.get`) and refuses calls from a
+  session outside the plugin's project or whose session cannot be looked up.
+* A shell tool's `workdir` (OpenCode) was ignored, and an explicit
+  `working_directory` was shadowed by the hook's own `cwd`, so a command run
+  in another repository was judged against the session's repository (e.g.
+  `git checkout -- f` allowed in a clean repo while discarding work in a dirty
+  one). Relative action directories are anchored at the event `cwd`.
+* `test_owner_required_exit_code_is_three` depended on the directory the suite
+  was started from; it now pins `--cwd` to its temporary directory.
+
 ## 0.1.0 - release candidate
 
 First public release candidate. Everything below is implemented and covered by
