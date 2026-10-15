@@ -385,6 +385,60 @@ class EngineStateTests(unittest.TestCase):
         )
         self.assertEqual(decision.verdict, REQUIRE_OWNER)
 
+    def _repo_alias(self) -> str:
+        """Return another name for the repository directory (symlink, or Windows 8.3 short name)."""
+        if os.name == "nt":
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(1024)
+            if not ctypes.windll.kernel32.GetShortPathNameW(self.repo.path, buffer, 1024):
+                self.skipTest("GetShortPathNameW failed")
+            if os.path.normcase(buffer.value) == os.path.normcase(self.repo.path):
+                self.skipTest("8.3 short names are disabled on this volume")
+            return buffer.value
+        alias = os.path.join(self._tmp.name, "repo-alias")
+        os.symlink(self.repo.path, alias)
+        return alias
+
+    def test_protected_paths_hold_through_a_repository_alias(self) -> None:
+        alias = self._repo_alias()
+        protected = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(alias, ".git", "config"), "content": "x"},
+            ctx=self.make_context(cwd=alias),
+        )
+        self.assertEqual(protected.verdict, DENY)
+        self.assertEqual(protected.reason_code, engine.REASON_DENY_PROTECTED_PATH)
+        ci = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(alias, ".github", "workflows", "ci.yml")},
+            ctx=self.make_context(cwd=alias),
+        )
+        self.assertEqual(ci.verdict, REQUIRE_OWNER)
+
+    def test_repository_alias_is_not_a_repo_escape(self) -> None:
+        alias = self._repo_alias()
+        decision = engine.evaluate(
+            "Write",
+            {"file_path": os.path.join(alias, "README.md"), "content": "x"},
+            ctx=self.make_context(profile="strict", cwd=alias),
+        )
+        self.assertEqual(decision.verdict, ALLOW)
+
+    def test_case_variants_of_policy_paths_are_matched_on_every_os(self) -> None:
+        def verdict(*parts: str) -> str:
+            return engine.evaluate(
+                "Write",
+                {"file_path": os.path.join(self.repo.path, *parts), "content": "x"},
+                ctx=self.make_context(),
+            ).verdict
+
+        self.assertEqual(verdict(".GIT", "config"), DENY)
+        self.assertEqual(verdict(".GitHub", "Workflows", "ci.yml"), REQUIRE_OWNER)
+        self.assertEqual(verdict(".Env.Local"), DENY)
+        # Case folding widens deny matches only: the template allowlist still covers templates.
+        self.assertEqual(verdict(".Env.Example"), ALLOW)
+
     def test_read_only_tool_is_out_of_scope_and_allowed(self) -> None:
         decision = engine.evaluate(
             "Read", {"file_path": "anything.txt"}, ctx=self.make_context()
