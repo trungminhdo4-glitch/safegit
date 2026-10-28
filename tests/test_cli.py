@@ -146,7 +146,8 @@ class CheckCommandTests(CliHarness):
 
     def test_owner_required_exit_code_is_three(self) -> None:
         code, out, _ = self.run_cli(
-            self.base("check", "--command", "git commit --" + "amend -m x", "--json")
+            # Neutral cwd: inside a checkout with a published HEAD, amend correctly escalates to DENY.
+            self.base("check", "--command", "git commit --" + "amend -m x", "--cwd", self.root, "--json")
         )
         self.assertEqual(code, 3)
         self.assertEqual(json.loads(out)["verdict"], "REQUIRE_OWNER")

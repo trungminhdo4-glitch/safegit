@@ -232,7 +232,9 @@ class EngineContext:
 MAX_PATH_TOKENS = 200
 MAX_TOKEN_CHARS = 260
 MAX_PATH_PATTERNS = 200
-_CASE_INSENSITIVE_MATCHING = os.name == "nt"
+# Always case-insensitive (fail closed): Windows and default macOS volumes treat `.ENV` and
+# `.env` as the same file, and the same policy must not allow it on one OS but deny it on another.
+_CASE_INSENSITIVE_MATCHING = True
 
 
 def _split_parts(value: str) -> list[str]:
