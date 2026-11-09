@@ -57,8 +57,12 @@ jobs:
           fail() { echo "FAILED: $1" >&2; exit 1; }
 
           safegit check --command "git status" || fail "clean command should be allowed"
-          safegit check --command "git reset --hard" && fail "hard reset should be denied" || true
-          safegit check --command "git push origin main" --profile strict && fail "strict push should not be allowed" || true
+          rc=0
+          safegit check --command "git reset --hard" || rc=$?
+          [ "$rc" -eq 2 ] || fail "hard reset should be denied (got $rc)"
+          rc=0
+          safegit check --command "git push origin main" --profile strict || rc=$?
+          [ "$rc" -eq 3 ] || fail "strict push should require owner approval (got $rc)"
 
           out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"},"cwd":"."}' | safegit hook claude; echo "rc=$?")
           case "$out" in *rc=2*) ;; *) fail "hook did not block a hard reset" ;; esac
