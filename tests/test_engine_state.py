@@ -233,10 +233,7 @@ class EngineStateTests(unittest.TestCase):
         )
 
     def test_commit_amend_published_is_denied(self) -> None:
-        bare = os.path.join(self._tmp.name, "remote.git")
-        git(self._tmp.name, "init", "--bare", "-b", "main", bare)
-        git(self.repo.path, "remote", "add", "origin", bare)
-        git(self.repo.path, "push", "-u", "origin", "main")
+        git(self.repo.path, "update-ref", "refs/remotes/origin/main", "HEAD")
         decision = self.decide("git commit --amend -m x")
         self.assertEqual(decision.verdict, DENY)
         self.assertEqual(
@@ -244,26 +241,13 @@ class EngineStateTests(unittest.TestCase):
         )
 
     def test_force_with_lease_denied_when_remote_ahead(self) -> None:
-        bare = os.path.join(self._tmp.name, "remote2.git")
-        git(self._tmp.name, "init", "--bare", "-b", "main", bare)
-        git(self.repo.path, "remote", "add", "origin", bare)
-        git(self.repo.path, "push", "-u", "origin", "main")
-        other = os.path.join(self._tmp.name, "other")
-        subprocess.run(
-            ["git", "clone", bare, other], capture_output=True, check=True, timeout=60
-        )
-        os.environ.setdefault("GIT_AUTHOR_NAME", GIT_ENV["GIT_AUTHOR_NAME"])
-        for key, value in GIT_ENV.items():
-            os.environ[key] = value
-        git(other, "config", "user.email", "test@example.invalid")
-        git(other, "config", "user.name", "SafeGit Test")
-        pathlib.Path(other, "remote-change.txt").write_text(
-            "remote work\n", encoding="utf-8"
-        )
-        git(other, "add", "-A")
-        git(other, "commit", "-m", "remote work")
-        git(other, "push", "origin", "main")
-        git(self.repo.path, "fetch", "origin")
+        # Model the state after a fetch using real commit ancestry and a tracking ref.
+        tip = git(
+            self.repo.path, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "remote work"
+        ).stdout.strip()
+        git(self.repo.path, "remote", "add", "origin", os.path.join(self._tmp.name, "remote.git"))
+        git(self.repo.path, "update-ref", "refs/remotes/origin/main", tip)
+        git(self.repo.path, "branch", "--set-upstream-to=origin/main", "main")
         decision = self.decide("git push --force-with-lease origin main")
         self.assertEqual(decision.verdict, DENY)
         self.assertGreaterEqual(
