@@ -266,6 +266,18 @@ class PolicyCommandTests(CliHarness):
         self.assertEqual(check["status"], "PASS", check["detail"])
         self.assertNotEqual(payload["overall"], "FAIL")
 
+    def test_doctor_detects_both_opencode_plugin_directories(self) -> None:
+        for directory in ("plugins", "plugin"):
+            with self.subTest(directory=directory):
+                cwd = pathlib.Path(self.root) / directory
+                path = cwd / ".opencode" / directory / "safegit.js"
+                path.parent.mkdir(parents=True)
+                path.write_text("export {};", encoding="utf-8")
+                _, out, _ = self.run_cli(self.base("doctor", "--cwd", str(cwd), "--json"))
+                check = next(c for c in json.loads(out)["checks"] if c["check"] == "opencode_plugin")
+                self.assertEqual(check["status"], "PASS")
+                self.assertEqual(pathlib.Path(check["detail"]), path)
+
     def test_policy_init_writes_a_valid_policy(self) -> None:
         target = os.path.join(self.root, "policy.json")
         code, out, _ = self.run_cli(["policy", "init", "--path", target, "--profile", "strict"])

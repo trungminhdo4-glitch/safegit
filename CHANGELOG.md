@@ -6,6 +6,10 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+* Detect OpenCode's plural `.opencode/plugins/` layout in `safegit doctor`.
+
 ## 0.1.0 - release candidate
 
 First public release candidate. Everything below is implemented and covered by

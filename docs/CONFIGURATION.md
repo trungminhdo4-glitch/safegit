@@ -229,6 +229,11 @@ become readable on disk):
   "audit": { "include_command": true } }
 ```
 
+## OpenCode installation check
+
+`safegit doctor --cwd <project>` looks for `safegit.js` under both
+`.opencode/plugin/` and `.opencode/plugins/`.
+
 ## Environment variables
 
 | Variable | Purpose | Trusted in hook mode? |

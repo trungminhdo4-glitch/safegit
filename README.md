@@ -180,7 +180,8 @@ safegit install opencode --dir . --write
 This writes `.opencode/plugin/safegit.js`, a ~30-line plugin that shells out
 to `safegit hook opencode` before every tool call and throws on a non-zero
 exit. Both `.opencode/plugin/` and `.opencode/plugins/` are loaded by OpenCode
-1.18.31 (measured). Note that `opencode --pure` deliberately disables plugins.
+1.18.31 (measured). `safegit doctor` checks both project directories for
+`safegit.js`. OpenCode disables plugins when launched with `--pure`.
 
 ### git hooks
 

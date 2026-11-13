@@ -745,7 +745,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     )
 
     claude_settings = pathlib.Path(cwd) / ".claude" / "settings.json"
-    opencode_plugin = pathlib.Path(cwd) / ".opencode" / "plugin" / "safegit.js"
+    opencode_plugins = pathlib.Path(cwd) / ".opencode"
+    opencode_candidates = (
+        opencode_plugins / directory / "safegit.js" for directory in ("plugin", "plugins")
+    )
+    opencode_plugin = next((path for path in opencode_candidates if path.is_file()), None)
     add(
         "claude_hook",
         "PASS" if _file_mentions(claude_settings, "safegit") else "WARN",
@@ -753,8 +757,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     )
     add(
         "opencode_plugin",
-        "PASS" if opencode_plugin.is_file() else "WARN",
-        str(opencode_plugin) if opencode_plugin.is_file() else "no project plugin installed",
+        "PASS" if opencode_plugin is not None else "WARN",
+        str(opencode_plugin) if opencode_plugin is not None else "no project plugin installed",
     )
 
     selftest_failures = _selftest_failures(policy)

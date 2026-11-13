@@ -25,6 +25,8 @@ hidden in a footnote of the README.
    hook entry, running OpenCode without plugins, or editing the settings file
    by hand disables the guard. SafeGit blocks *agent* writes to those files,
    not the owner's.
+   The `opencode_plugin` check in `safegit doctor` reports file presence.
+   Whether a running OpenCode session loaded the plugin requires a runtime check.
 5. **Interlocks are advisory on Linux/macOS.** The verified platform is
    Windows 11. Path comparison is case-insensitive on Windows and
    case-sensitive elsewhere; the store lock uses a create-exclusive lock file
