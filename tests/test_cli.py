@@ -38,6 +38,16 @@ class CliHarness(unittest.TestCase):
                 os.environ["SAFEGIT_AUDIT_PATH"] = previous_audit_env
 
         self.addCleanup(restore)
+
+        # Policy discovery walks up from the cwd. Run in the temp root so a
+        # repo-local .safegit/safegit.policy.json cannot override --profile.
+        previous_cwd = os.getcwd()
+        os.chdir(self.root)
+
+        def restore_cwd() -> None:
+            os.chdir(previous_cwd)
+
+        self.addCleanup(restore_cwd)
         self.claude_pretooluse = {
             "session_id": "s",
             "cwd": self.root,
