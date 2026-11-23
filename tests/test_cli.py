@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
@@ -427,6 +428,83 @@ class InstallTests(CliHarness):
         pinned_git = pinned[pinned.index("--git") + 1]
         self.assertTrue(os.path.isabs(pinned_git), pinned_git)
         self.assertEqual(os.path.normcase(pinned_git), os.path.normcase(os.path.abspath(git)))
+
+    def _install_with_policy_env(self, host: str, policy_env: str) -> tuple[int, str, str]:
+        settings = os.path.join(self.root, ".claude", "settings.json")
+        argv = ["install", host, "--dir", self.root, "--write"]
+        if host == "claude":
+            argv += ["--settings", settings]
+        with mock.patch.dict(os.environ, {"SAFEGIT_POLICY": policy_env}):
+            return self.run_cli(argv)
+
+    def _nothing_installed(self) -> bool:
+        root = pathlib.Path(self.root)
+        return not (root / ".claude" / "settings.json").exists() and not (
+            root / ".opencode" / "plugins" / "safegit.js"
+        ).exists()
+
+    def test_install_refuses_a_missing_explicit_policy_instead_of_pinning_default(self) -> None:
+        # A typo in SAFEGIT_POLICY must not silently pin the weaker builtin
+        # default: policy.load() never degrades an explicit policy either.
+        missing = os.path.join(self.root, "no-such.policy.json")
+        for host in ("claude", "opencode"):
+            with self.subTest(host=host):
+                code, out, err = self._install_with_policy_env(host, missing)
+                self.assertNotEqual(code, 0)
+                self.assertIn("POLICY_NOT_FOUND", err)
+                self.assertNotIn("--profile", out)
+                self.assertTrue(self._nothing_installed())
+
+    def test_install_refuses_an_invalid_policy_file(self) -> None:
+        broken = pathlib.Path(self.root) / "broken.policy.json"
+        broken.write_text("{not json", encoding="utf-8")
+        for host in ("claude", "opencode"):
+            with self.subTest(host=host):
+                code, _, err = self._install_with_policy_env(host, str(broken))
+                self.assertNotEqual(code, 0)
+                self.assertIn("POLICY_JSON_INVALID", err)
+                self.assertTrue(self._nothing_installed())
+
+    def test_install_pins_a_valid_explicit_policy(self) -> None:
+        policy_path = pathlib.Path(self.root) / "team.policy.json"
+        code, _, err = self.run_cli(["policy", "init", "--path", str(policy_path)])
+        self.assertEqual(code, 0, err)
+        code, _, err = self._install_with_policy_env("claude", str(policy_path))
+        self.assertEqual(code, 0, err)
+        settings = pathlib.Path(self.root) / ".claude" / "settings.json"
+        command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0][
+            "hooks"
+        ][0]["command"]
+        self.assertIn("--policy %s" % policy_path, command)
+        self.assertNotIn("--profile", command)
+
+    def test_claude_install_quotes_a_pinned_path_with_spaces(self) -> None:
+        policy_dir = pathlib.Path(self.root) / "Jane Doe"
+        policy_dir.mkdir()
+        policy_path = policy_dir / "team.policy.json"
+        code, _, err = self.run_cli(["policy", "init", "--path", str(policy_path)])
+        self.assertEqual(code, 0, err)
+        code, _, err = self._install_with_policy_env("claude", str(policy_path))
+        self.assertEqual(code, 0, err)
+        settings = pathlib.Path(self.root) / ".claude" / "settings.json"
+        command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0][
+            "hooks"
+        ][0]["command"]
+        self.assertIn('--policy "%s"' % policy_path, command)
+
+    def test_claude_install_refuses_shell_metacharacters_in_a_pinned_path(self) -> None:
+        policy_dir = pathlib.Path(self.root) / "a&b"
+        try:
+            policy_dir.mkdir()
+        except OSError:
+            self.skipTest("filesystem rejects '&' in names")
+        policy_path = policy_dir / "team.policy.json"
+        code, _, err = self.run_cli(["policy", "init", "--path", str(policy_path)])
+        self.assertEqual(code, 0, err)
+        code, _, err = self._install_with_policy_env("claude", str(policy_path))
+        self.assertNotEqual(code, 0)
+        self.assertIn("UNSAFE_HOOK_ARGUMENT", err)
+        self.assertTrue(self._nothing_installed())
 
     def test_githook_install_refuses_to_clobber_existing_hook(self) -> None:
         repo = os.path.join(self.root, "hookrepo")

@@ -943,6 +943,20 @@ def _hook_command_prefix() -> str:
     return launcher
 
 
+def _command_word(word: str) -> str:
+    """Quote one pinned argument for a hook command line the host runs in a shell.
+
+    A path with a space (``C:\\Users\\Jane Doe\\...``) would otherwise split
+    into several arguments; shell metacharacters are refused outright, the
+    same rule :func:`_hook_command_prefix` applies to the interpreter path.
+    """
+    if any(char in word for char in _SHELL_METACHARACTERS):
+        raise policy_module.PolicyError("UNSAFE_HOOK_ARGUMENT:%s" % word)
+    if not word or any(char.isspace() for char in word):
+        return '"%s"' % word
+    return word
+
+
 def _sh_hook_command_prefix() -> str:
     """Interpreter prefix for a POSIX ``sh`` hook (Git for Windows runs hooks in Git Bash).
 
@@ -968,16 +982,18 @@ def _pinned_args(cwd: str) -> list[str]:
     environment variable silently redirects the gate.  The installed hook
     therefore carries explicit paths (or an explicit builtin profile) so the
     environment cannot change what the gate trusts.
+
+    Fail-closed like :func:`policy.load`: a policy that was found or
+    explicitly named but is missing or invalid raises ``PolicyError``; it is
+    never silently replaced by the builtin default profile.
     """
     args: list[str] = []
-    try:
-        resolved = policy_module.resolve_policy_path(start_dir=cwd)
-    except Exception:
-        resolved = None
-    if resolved is not None and pathlib.Path(resolved).is_file():
-        args.extend(["--policy", str(resolved)])
-    else:
+    resolved = policy_module.resolve_policy_path(start_dir=cwd)
+    if resolved is None:
         args.extend(["--profile", "default"])
+    else:
+        policy_module.load(resolved)
+        args.extend(["--policy", str(resolved)])
     args.extend(["--approval-store", str(approvals.default_store_path())])
     return args
 
@@ -987,7 +1003,7 @@ def _install_claude(args: argparse.Namespace, cwd: str) -> int:
     try:
         entry_command = "%s hook claude %s" % (
             _hook_command_prefix(),
-            " ".join(_pinned_args(cwd)),
+            " ".join(_command_word(word) for word in _pinned_args(cwd)),
         )
     except policy_module.PolicyError as exc:
         return _fail("SafeGit: cannot build a safe hook command (%s)" % exc, EXIT_USAGE)
