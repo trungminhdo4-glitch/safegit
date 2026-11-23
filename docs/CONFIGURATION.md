@@ -179,6 +179,26 @@ changing a profile.
 | `--no-approvals` | Ignore outstanding approvals (useful for testing and for CI) |
 | `--strict` (preflight) | Treat preflight warnings as blocking |
 
+## Audit queries
+
+```bash
+safegit audit --verdict DENY --tail 10
+safegit audit --verdict REQUIRE_OWNER --summary --json
+safegit audit --path ./exported-audit.jsonl --tail 50 --json
+```
+
+`--verdict` accepts exactly `ALLOW`, `DENY`, `REQUIRE_OWNER` or `UNKNOWN`;
+omitting it includes every verdict. Filtering happens before `--tail`, so
+recent allowed actions do not hide earlier denied ones. `--tail` defaults to
+20 valid matching records, returned in their original log order.
+`--summary` counts the whole matching log and ignores `--tail`.
+
+Queries read incrementally, retaining only the requested tail or per-verdict
+counts. Invalid UTF-8, malformed/non-object JSON, excessively nested JSON and
+lines over 32 KiB plus CRLF are skipped. Missing or unreadable logs keep the
+existing best-effort behavior (empty or partial results). Queries do not
+modify the log or verify receipt digests.
+
 ## Recipes
 
 **Block direct pushes to a release branch, allow the rest**

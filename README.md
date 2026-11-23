@@ -203,7 +203,14 @@ safegit explain git.push.force
 safegit policy init --profile strict
 safegit approve --command "git push --force-with-lease origin release/1.0"
 safegit audit --summary
+safegit audit --verdict DENY --tail 10 --json
 ```
+
+Audit queries stream the log. `--verdict` selects `ALLOW`, `DENY`,
+`REQUIRE_OWNER` or `UNKNOWN` before applying `--tail` (default 20 valid
+records), and also works with `--summary` to count matching records across
+the whole log. Results remain in log order. See
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#audit-queries) for details.
 
 Exit codes: `0` ALLOW, `2` DENY, `3` REQUIRE_OWNER, `4` UNKNOWN, `64` usage,
 `70` internal error. In hook mode, exit `2` means "blocked" and is used for

@@ -20,6 +20,8 @@ import json
 import os
 import pathlib
 import time
+from collections import deque
+from collections.abc import Iterator
 from typing import Any
 
 RECEIPT_SCHEMA = "safegit.receipt/1"
@@ -37,9 +39,7 @@ def digest_payload(payload: dict[str, Any]) -> str:
 
 
 def action_digest(text: str) -> str:
-    return (
-        "sha256:" + hashlib.sha256((text or "").encode("utf-8", "replace")).hexdigest()
-    )
+    return "sha256:" + hashlib.sha256((text or "").encode("utf-8", "replace")).hexdigest()
 
 
 def build_receipt(
@@ -79,9 +79,7 @@ def build_receipt(
         "approval_id": str(decision.get("approval_id", ""))[:40],
         "action_digest": action_digest(action_text),
         "findings": findings,
-        "limitations": [
-            str(item)[:120] for item in (decision.get("limitations") or [])
-        ][:40],
+        "limitations": [str(item)[:120] for item in (decision.get("limitations") or [])][:40],
         "repository": {
             "root": str(repo.get("root", ""))[:260],
             "branch": str(repo.get("branch", ""))[:120],
@@ -112,10 +110,7 @@ def _bounded(value: Any, depth: int = 0) -> Any:
     if depth > 3:
         return "..."
     if isinstance(value, dict):
-        return {
-            str(key)[:60]: _bounded(item, depth + 1)
-            for key, item in list(value.items())[:24]
-        }
+        return {str(key)[:60]: _bounded(item, depth + 1) for key, item in list(value.items())[:24]}
     if isinstance(value, (list, tuple)):
         return [_bounded(item, depth + 1) for item in list(value)[:24]]
     if isinstance(value, str):
@@ -195,9 +190,7 @@ def _bounded_json_line(receipt: dict[str, Any]) -> str:
             candidate[key] = value[: max(len(value) // 2, 0)]
             line = json.dumps(candidate, sort_keys=True, default=str)
     while len(line) > MAX_AUDIT_LINE_CHARS and candidate.get("findings"):
-        candidate["findings"] = list(candidate["findings"])[
-            : len(candidate["findings"]) // 2
-        ]
+        candidate["findings"] = list(candidate["findings"])[: len(candidate["findings"]) // 2]
         line = json.dumps(candidate, sort_keys=True, default=str)
     if len(line) > MAX_AUDIT_LINE_CHARS:
         candidate = {
@@ -221,9 +214,7 @@ def _prune_audit(path: pathlib.Path, retention_days: int) -> None:
         return
     if (time.time() - stat.st_mtime) < retention_days * 86400:
         return
-    cutoff = time.strftime(
-        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - retention_days * 86400)
-    )
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - retention_days * 86400))
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -242,20 +233,34 @@ def _prune_audit(path: pathlib.Path, retention_days: int) -> None:
         return
 
 
-def read_audit(path: pathlib.Path, limit: int = 20) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
+def _iter_audit(path: pathlib.Path, verdict: str | None = None) -> Iterator[dict[str, Any]]:
+    # Allow four UTF-8 bytes per writer-bounded character plus a CRLF.
+    # A damaged line must not turn a streaming query into an unbounded read.
+    max_line_bytes = MAX_AUDIT_LINE_CHARS * 4 + 2
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        if not path.is_file():
+            return
+        with path.open("rb") as handle:
+            while line := handle.readline(max_line_bytes + 1):
+                if len(line) > max_line_bytes:
+                    while line and not line.endswith(b"\n"):
+                        line = handle.readline(max_line_bytes + 1)
+                    continue
+                try:
+                    entry = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+                    continue
+                if isinstance(entry, dict) and (verdict is None or entry.get("verdict") == verdict):
+                    yield entry
     except OSError:
-        return []
-    entries: list[dict[str, Any]] = []
-    for line in lines[-max(limit, 1) :]:
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return entries
+        return
+
+
+def read_audit(
+    path: pathlib.Path, limit: int = 20, *, verdict: str | None = None
+) -> list[dict[str, Any]]:
+    """Return the latest matching valid objects, in log order, using bounded storage."""
+    return list(deque(_iter_audit(path, verdict), maxlen=max(limit, 1)))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -272,19 +277,11 @@ class AuditSummary:
         }
 
 
-def summarize_audit(path: pathlib.Path) -> AuditSummary:
+def summarize_audit(path: pathlib.Path, *, verdict: str | None = None) -> AuditSummary:
     counts: dict[str, int] = {}
     total = 0
-    if path.is_file():
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                total += 1
-                verdict = str(entry.get("verdict", "UNKNOWN"))
-                counts[verdict] = counts.get(verdict, 0) + 1
-        except OSError:
-            pass
+    for entry in _iter_audit(path, verdict):
+        total += 1
+        entry_verdict = str(entry.get("verdict", "UNKNOWN"))
+        counts[entry_verdict] = counts.get(entry_verdict, 0) + 1
     return AuditSummary(path=str(path), entries=total, verdicts=counts)

@@ -6,8 +6,16 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+* `safegit audit --verdict ALLOW|DENY|REQUIRE_OWNER|UNKNOWN` filters both
+  tail output and whole-log summaries, in text or JSON.
+
 ### Fixed
 
+* Audit queries stream records instead of loading the entire log into memory.
+  Malformed JSON, non-object records, invalid UTF-8, excessively nested JSON
+  and oversized lines are skipped; `--tail` counts valid matching records.
 * `safegit preflight` crashed with `NameError: name 'FAIL' is not defined`
   (exit 70) whenever there was any finding, so the pre-commit gate refused
   every such commit. `FAIL`/`WARN` are now imported in `cli.py`.
