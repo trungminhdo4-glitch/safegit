@@ -17,7 +17,6 @@ import base64
 import hashlib
 import json
 import pathlib
-import shutil
 import sys
 import time
 import zipfile

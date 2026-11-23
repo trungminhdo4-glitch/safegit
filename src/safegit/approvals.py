@@ -79,7 +79,7 @@ class Approval:
             "digest": self.digest,
         }
 
-    def with_digest(self) -> "Approval":
+    def with_digest(self) -> Approval:
         return dataclasses.replace(self, digest=_digest_of(self.to_dict()))
 
     def is_expired(self, now: int | None = None) -> bool:

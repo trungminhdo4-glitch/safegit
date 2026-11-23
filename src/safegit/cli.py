@@ -18,18 +18,21 @@ from . import (
     engine,
     gitop,
     gitstate,
+)
+from . import (
     policy as policy_module,
 )
 from . import preflight as preflight_module
-from .preflight import FAIL, WARN
 from . import receipt as receipt_module
+from .preflight import FAIL, WARN
 from .verdicts import (
     ALLOW,
     DENY,
-    REQUIRE_OWNER,
-    VERDICT_EXIT_CODES,
     EXIT_INTERNAL_ERROR,
     EXIT_USAGE,
+    REQUIRE_OWNER,
+    VERDICT_EXIT_CODES,
+    VERDICTS,
 )
 
 SUPPORTED_PYTHON = (3, 9)
@@ -63,13 +66,16 @@ def _guard_against_cwd_shadowing() -> None:
             resolved = candidate.resolve()
         except OSError:
             continue
-        if resolved.is_file() and resolved.parent != package_dir:
-            if cwd != package_dir.parent:
-                sys.stderr.write(
-                    "SAFEGIT_SHADOWED_BY_WORKING_DIRECTORY: refusing to run, "
-                    "%s would be imported instead of SafeGit\n" % resolved
-                )
-                raise SystemExit(2)
+        if (
+            resolved.is_file()
+            and resolved.parent != package_dir
+            and cwd != package_dir.parent
+        ):
+            sys.stderr.write(
+                "SAFEGIT_SHADOWED_BY_WORKING_DIRECTORY: refusing to run, "
+                "%s would be imported instead of SafeGit\n" % resolved
+            )
+            raise SystemExit(2)
 
 
 def _print_json(payload: Any) -> None:
@@ -653,7 +659,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
             repo_root=gitstate.find_repo_root(cwd, git_executable=args.git or "git"),
         )
     if args.summary:
-        summary = receipt_module.summarize_audit(path)
+        summary = receipt_module.summarize_audit(path, verdict=args.verdict)
         if args.json:
             _print_json(summary.to_dict())
         else:
@@ -662,7 +668,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
             for verdict, count in sorted(summary.verdicts.items()):
                 sys.stdout.write("  %s: %d\n" % (verdict, count))
         return 0
-    entries = receipt_module.read_audit(path, limit=args.tail)
+    entries = receipt_module.read_audit(path, limit=args.tail, verdict=args.verdict)
     if args.json:
         _print_json(entries)
     else:
@@ -1317,6 +1323,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit = sub.add_parser("audit", help="read the decision audit log")
     p_audit.add_argument("--tail", type=int, default=20)
     p_audit.add_argument("--summary", action="store_true")
+    p_audit.add_argument("--verdict", choices=VERDICTS, help="only include this decision verdict")
     p_audit.add_argument("--path")
     p_audit.add_argument("--cwd")
     p_audit.add_argument("--json", action="store_true")

@@ -90,7 +90,10 @@ hidden in a footnote of the README.
     and every receipt records `policy_profile` and `policy_digest`, so a
     downgrade is visible in the audit log.
 19. **The audit log can be deleted** by the same user. It is a record, not a
-    tamper-proof ledger.
+    tamper-proof ledger. Audit queries are best effort: unreadable logs may
+    yield empty or partial results, and malformed, non-object, invalid-UTF-8,
+    excessively nested or oversized records are skipped. Queries do not
+    verify receipt digests. An empty result is not proof that no action occurred.
 20. **`action_digest` is an unsalted SHA-256** of the action text. For short,
     guessable commands it is a confirmation oracle; it is not a secret.
 21. **Finding messages contain path names.** A denial message names the file it

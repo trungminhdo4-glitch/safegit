@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import io
 import json
 import os
 import pathlib
@@ -20,7 +19,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-from safegit import cli, engine, gitop, gitstate, policy as policy_module, shellparse  # noqa: E402
+from safegit import engine, gitop, gitstate, policy as policy_module, shellparse  # noqa: E402
 
 COMMANDS: tuple[str, ...] = (
     "git status",
