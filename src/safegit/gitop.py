@@ -973,6 +973,19 @@ def classify_all(invocation: GitInvocation) -> list[GitOp]:
 
     elif subcommand in ("checkout", "switch"):
         path_like = [p for p in positionals if p in (".", "..", "*") or "*" in p]
+        # "checkout -B" and "switch -C/--force-create" reset an existing
+        # branch to the start point, dropping its commits from the ref.  The
+        # remaining checks still run, so a forced or path checkout combined
+        # with it is reported as well.
+        force_reset = (subcommand == "checkout" and _flag_present(flags, "-B")) or (
+            subcommand == "switch" and _flag_present(flags, "-C", "--force-create")
+        )
+        if force_reset:
+            add(
+                RULE_REF_WRITE,
+                detail=f"{subcommand} {'-B' if subcommand == 'checkout' else '-C'}"
+                " resets an existing branch",
+            )
         if _flag_present(flags, "--ours", "--theirs"):
             add(RULE_NON_DESTRUCTIVE, detail="conflict side selection during a merge")
         elif _flag_present(flags, "-f", "--force", "--discard-changes"):
@@ -995,9 +1008,9 @@ def classify_all(invocation: GitInvocation) -> list[GitOp]:
                 detail="checkout target may be a path or a branch",
                 ambiguity="path_or_ref",
             )
-        elif subcommand == "switch" and _flag_present(
-            flags, "-c", "-C", "--create", "--force-create"
-        ):
+        elif force_reset:
+            pass
+        elif subcommand == "switch" and _flag_present(flags, "-c", "--create"):
             add(RULE_NON_DESTRUCTIVE, detail="switch creates a branch")
         elif subcommand == "checkout" and _flag_present(flags, "-b"):
             add(RULE_NON_DESTRUCTIVE, detail="checkout -b creates a branch")
