@@ -40,7 +40,7 @@ class ShellParseTests(unittest.TestCase):
         programs = [c.argv[0] for c in result.commands]
         self.assertIn("echo", programs)
         self.assertIn("git", programs)
-        git_cmd = [c for c in result.commands if c.argv[0] == "git"][0]
+        git_cmd = next(c for c in result.commands if c.argv[0] == "git")
         self.assertTrue(git_cmd.from_substitution)
 
     def test_backtick_substitution_is_scanned(self) -> None:

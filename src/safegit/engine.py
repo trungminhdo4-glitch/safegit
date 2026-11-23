@@ -20,7 +20,6 @@ from __future__ import annotations
 import dataclasses
 import fnmatch
 import os
-import posixpath
 import re
 import stat
 from typing import Any
@@ -258,11 +257,9 @@ def _match_glob(relative: str, absolute: str, pattern: str) -> bool:
     if not pattern or len(pattern) > 512:
         return False
     rel = relative.replace("\\", "/")
-    if rel.startswith("./"):
-        rel = rel[2:]
+    rel = rel.removeprefix("./")
     abs_posix = absolute.replace("\\", "/")
-    if abs_posix.startswith("./"):
-        abs_posix = abs_posix[2:]
+    abs_posix = abs_posix.removeprefix("./")
     candidates = [rel, abs_posix]
     if not abs_posix.startswith("/"):
         candidates.append("/" + abs_posix)

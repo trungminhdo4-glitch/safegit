@@ -246,7 +246,7 @@ def normalize(
             args, "patch", "patchText", "patch_text", "diff", "input"
         )
         paths = sorted(
-            set(match.strip() for match in _PATCH_PATH_RE.findall(patch_text))
+            {match.strip() for match in _PATCH_PATH_RE.findall(patch_text)}
         )
         if not paths:
             limitations.append("PATCH_TARGETS_NOT_RESOLVABLE")

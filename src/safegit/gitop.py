@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 from . import shellparse
 
@@ -178,7 +178,6 @@ _KNOWN_BUT_UNCLASSIFIED = frozenset(
         "request-pull",
         "rerere",
         "send-pack",
-        "sparse-checkout",
         "stripspace",
         "update-index",
         "update-server-info",
@@ -633,7 +632,7 @@ def _split_global_options(tokens: list[str]) -> tuple[list[str], dict[str, objec
                 extra["config"].append((key.lower(), value))  # type: ignore[union-attr]
             index += 2
             continue
-        if token.startswith("--exec-path") or token.startswith("--namespace"):
+        if token.startswith(("--exec-path", "--namespace")):
             index += 2 if "=" not in token else 1
             continue
         if token in (
@@ -741,8 +740,7 @@ def _flag_present(flags: frozenset[str], *names: str) -> bool:
 def _first_branch(refspecs: tuple[str, ...]) -> str | None:
     for refspec in refspecs:
         candidate = refspec.lstrip("+")
-        if candidate.startswith(":"):
-            candidate = candidate[1:]
+        candidate = candidate.removeprefix(":")
         if ":" in candidate:
             candidate = candidate.split(":", 1)[1]
         candidate = candidate.replace("refs/heads/", "").strip()
@@ -799,9 +797,10 @@ def classify_all(invocation: GitInvocation) -> list[GitOp]:
             continue
         if any(normalized.startswith(risk) for risk in _INLINE_CONFIG_RISK_KEYS):
             add(RULE_CONFIG_INLINE, detail="-c %s=%s" % (key, value))
-        if any(normalized.startswith(risk) for risk in _HOOK_BYPASS_CONFIG_KEYS):
-            if value.lower() in ("false", "0", "no", "nul", "/dev/null", ""):
-                add(RULE_HOOK_BYPASS, detail="-c %s=%s" % (key, value))
+        if any(normalized.startswith(risk) for risk in _HOOK_BYPASS_CONFIG_KEYS) and (
+            value.lower() in ("false", "0", "no", "nul", "/dev/null", "")
+        ):
+            add(RULE_HOOK_BYPASS, detail="-c %s=%s" % (key, value))
 
     bypass_env = {
         "HUSKY",

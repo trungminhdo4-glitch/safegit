@@ -92,12 +92,12 @@ class HookProtocolTests(CliHarness):
         self.assertEqual(err, "")
 
     def test_claude_hook_is_fail_closed_on_invalid_stdin(self) -> None:
-        code, out, err = self.run_cli(self.base("hook", "claude"), "not json at all")
+        code, _out, err = self.run_cli(self.base("hook", "claude"), "not json at all")
         self.assertEqual(code, 2)
         self.assertIn("SAFEGIT_HOOK_INPUT_INVALID", err)
 
     def test_claude_hook_is_fail_closed_when_tool_name_missing(self) -> None:
-        code, out, err = self.run_cli(self.base("hook", "claude"), json.dumps({"cwd": self.root}))
+        code, _out, err = self.run_cli(self.base("hook", "claude"), json.dumps({"cwd": self.root}))
         self.assertEqual(code, 2)
         self.assertIn("SAFEGIT_HOOK_TOOL_NAME_MISSING", err)
 
@@ -139,7 +139,7 @@ class HookProtocolTests(CliHarness):
 
     def test_opencode_hook_allows_safe_command(self) -> None:
         event = {"tool": "bash", "cwd": self.root, "args": {"command": "git status"}}
-        code, _, err = self.run_cli(self.base("hook", "opencode"), json.dumps(event))
+        code, _, _err = self.run_cli(self.base("hook", "opencode"), json.dumps(event))
         self.assertEqual(code, 0)
 
     def test_opencode_workdir_is_judged_in_the_repo_it_runs_in(self) -> None:
@@ -232,7 +232,7 @@ class CheckCommandTests(CliHarness):
 class PrivacyTests(CliHarness):
     def test_audit_log_does_not_store_command_text_by_default(self) -> None:
         secret_marker = "token=ghp_" + "A" * 20
-        code, _, _ = self.run_cli(
+        _code, _, _ = self.run_cli(
             self.base(
                 "check",
                 "--cwd",
@@ -277,7 +277,7 @@ class PrivacyTests(CliHarness):
         self.assertFalse((pathlib.Path(self.root) / ".safegit").exists())
 
     def test_decision_receipt_is_digest_sealed_and_verifiable(self) -> None:
-        code, out, _ = self.run_cli(self.base("check", "--command", "git status", "--json"))
+        _code, out, _ = self.run_cli(self.base("check", "--command", "git status", "--json"))
         receipt = json.loads(out)["receipt"]
         self.assertTrue(receipt_module.verify_receipt(receipt))
         tampered = dict(receipt)
@@ -304,15 +304,15 @@ class PolicyCommandTests(CliHarness):
             self.assertTrue(json.loads(out)["ok"], profile)
 
     def test_doctor_selftest_check_passes(self) -> None:
-        code, out, _ = self.run_cli(self.base("doctor", "--cwd", self.root, "--json"))
+        _code, out, _ = self.run_cli(self.base("doctor", "--cwd", self.root, "--json"))
         payload = json.loads(out)
-        check = [item for item in payload["checks"] if item["check"] == "rule_selftest"][0]
+        check = next(item for item in payload["checks"] if item["check"] == "rule_selftest")
         self.assertEqual(check["status"], "PASS", check["detail"])
         self.assertNotEqual(payload["overall"], "FAIL")
 
     def test_policy_init_writes_a_valid_policy(self) -> None:
         target = os.path.join(self.root, "policy.json")
-        code, out, _ = self.run_cli(["policy", "init", "--path", target, "--profile", "strict"])
+        code, _out, _ = self.run_cli(["policy", "init", "--path", target, "--profile", "strict"])
         self.assertEqual(code, 0)
         document = json.loads(pathlib.Path(target).read_text(encoding="utf-8"))
         self.assertEqual(document["profile"], "strict")

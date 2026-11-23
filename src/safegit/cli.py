@@ -66,13 +66,16 @@ def _guard_against_cwd_shadowing() -> None:
             resolved = candidate.resolve()
         except OSError:
             continue
-        if resolved.is_file() and resolved.parent != package_dir:
-            if cwd != package_dir.parent:
-                sys.stderr.write(
-                    "SAFEGIT_SHADOWED_BY_WORKING_DIRECTORY: refusing to run, "
-                    "%s would be imported instead of SafeGit\n" % resolved
-                )
-                raise SystemExit(2)
+        if (
+            resolved.is_file()
+            and resolved.parent != package_dir
+            and cwd != package_dir.parent
+        ):
+            sys.stderr.write(
+                "SAFEGIT_SHADOWED_BY_WORKING_DIRECTORY: refusing to run, "
+                "%s would be imported instead of SafeGit\n" % resolved
+            )
+            raise SystemExit(2)
 
 
 def _print_json(payload: Any) -> None:
