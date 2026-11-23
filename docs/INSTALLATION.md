@@ -149,6 +149,11 @@ Appends a marked block to `.git/hooks/pre-commit` that runs
 refuses unless `--force` is given. Use `--repo` to target a specific
 repository.
 
+Like the agent hooks, the block pins the policy found at install time
+(`--policy <path>`, or `--profile default` when there is none) with
+`--pinned`, so `SAFEGIT_POLICY` cannot redirect the commit gate. Re-run the
+install after adding or moving a policy file.
+
 ## Approving one risky action
 
 ```bash

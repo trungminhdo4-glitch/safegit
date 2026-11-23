@@ -605,6 +605,95 @@ class InstallTests(CliHarness):
         self.assertNotIn("not found", completed.stderr)
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_githook_pins_its_policy_against_environment_redirection(self) -> None:
+        # Like the agent hooks, the commit gate must not follow a
+        # SAFEGIT_POLICY that appears after installation.
+        repo = os.path.join(self.root, "pinrepo")
+        subprocess.run(
+            ["git", "init", "-b", "main", repo], capture_output=True, check=True, timeout=60
+        )
+        code, _, err = self.run_cli(["install", "githooks", "--repo", repo, "--write"])
+        self.assertEqual(code, 0, err)
+        exec_line = next(
+            line
+            for line in (pathlib.Path(repo) / ".git" / "hooks" / "pre-commit")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.startswith("exec ")
+        )
+        self.assertIn(" --pinned", exec_line)
+        self.assertIn("--profile", exec_line)
+
+        broken = pathlib.Path(self.root) / "broken.policy.json"
+        broken.write_text("{not json", encoding="utf-8")
+        pathlib.Path(repo, "a.txt").write_text("a\n", encoding="utf-8")
+        subprocess.run(["git", "-C", repo, "add", "a.txt"], capture_output=True, check=True, timeout=60)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1] / "src")
+        env["SAFEGIT_POLICY"] = str(broken)
+        identity = ["-c", "user.name=SafeGit Test", "-c", "user.email=test@example.invalid"]
+        identity += ["-c", "core.hooksPath=.git/hooks"]
+        completed = subprocess.run(
+            ["git", "-C", repo, *identity, "commit", "-m", "pinned"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_githook_reinstall_upgrades_an_old_safegit_block_in_place(self) -> None:
+        repo = os.path.join(self.root, "upgraderepo")
+        subprocess.run(
+            ["git", "init", "-b", "main", repo], capture_output=True, check=True, timeout=60
+        )
+        hook = pathlib.Path(repo) / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        old_block = (
+            "# >>> safegit pre-commit >>>\n"
+            'exec "/old/python" -m safegit preflight --repo "$(git rev-parse --show-toplevel)" --strict\n'
+            "# <<< safegit pre-commit <<<\n"
+        )
+        hook.write_text("#!/bin/sh\necho mine\n" + old_block + "echo after\n", encoding="utf-8")
+        code, out, err = self.run_cli(["install", "githooks", "--repo", repo, "--write"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("updated", out)
+        content = hook.read_text(encoding="utf-8")
+        self.assertEqual(content.count("# >>> safegit pre-commit >>>"), 1)
+        self.assertIn("echo mine\n", content)
+        self.assertIn("echo after\n", content)
+        self.assertNotIn("/old/python", content)
+        self.assertIn(" --pinned", content)
+        # A second run is a no-op.
+        code, out, _ = self.run_cli(["install", "githooks", "--repo", repo, "--write"])
+        self.assertEqual(code, 0)
+        self.assertIn("already installed", out)
+        self.assertEqual(hook.read_text(encoding="utf-8"), content)
+
+    def test_githook_quotes_a_pinned_policy_path_for_sh(self) -> None:
+        repo = os.path.join(self.root, "quoted repo")
+        subprocess.run(
+            ["git", "init", "-b", "main", repo], capture_output=True, check=True, timeout=60
+        )
+        policy_path = pathlib.Path(repo) / ".safegit" / "safegit.policy.json"
+        code, _, err = self.run_cli(["policy", "init", "--path", str(policy_path)])
+        self.assertEqual(code, 0, err)
+        code, _, err = self.run_cli(["install", "githooks", "--repo", repo, "--write"])
+        self.assertEqual(code, 0, err)
+        exec_line = next(
+            line
+            for line in (pathlib.Path(repo) / ".git" / "hooks" / "pre-commit")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.startswith("exec ")
+        )
+        expected = '--policy "%s"' % str(policy_path.resolve()).replace("\\", "/")
+        self.assertIn(expected, exec_line)
+        self.assertNotIn("\\", exec_line)
+
 
 class PreflightCommandTests(CliHarness):
     """`safegit preflight` must report findings, never crash on them (F3: NameError, exit 70)."""

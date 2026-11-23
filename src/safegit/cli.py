@@ -958,6 +958,15 @@ def _command_word(word: str) -> str:
     return word
 
 
+def _sh_word(word: str) -> str:
+    """Quote one pinned argument for a POSIX ``sh`` hook (see :func:`_sh_hook_command_prefix`)."""
+    if any(char in word for char in _SHELL_METACHARACTERS):
+        raise policy_module.PolicyError("UNSAFE_HOOK_ARGUMENT:%s" % word)
+    if word.startswith("--"):
+        return word
+    return '"%s"' % word.replace("\\", "/")
+
+
 def _sh_hook_command_prefix() -> str:
     """Interpreter prefix for a POSIX ``sh`` hook (Git for Windows runs hooks in Git Bash).
 
@@ -988,6 +997,15 @@ def _pinned_args(cwd: str) -> list[str]:
     explicitly named but is missing or invalid raises ``PolicyError``; it is
     never silently replaced by the builtin default profile.
     """
+    return [
+        *_pinned_policy_args(cwd),
+        "--approval-store",
+        str(approvals.default_store_path()),
+    ]
+
+
+def _pinned_policy_args(cwd: str) -> list[str]:
+    """The policy half of :func:`_pinned_args` (the commit gate needs no approval store)."""
     args: list[str] = []
     resolved = policy_module.resolve_policy_path(start_dir=cwd)
     if resolved is None:
@@ -997,7 +1015,6 @@ def _pinned_args(cwd: str) -> list[str]:
         args.extend(["--policy", str(resolved)])
     # --profile alone is only a fallback; --pinned makes it binding.
     args.append("--pinned")
-    args.extend(["--approval-store", str(approvals.default_store_path())])
     return args
 
 
@@ -1200,6 +1217,23 @@ def _install_opencode(args: argparse.Namespace, cwd: str) -> int:
 GITHOOK_MARKER = "# >>> safegit pre-commit >>>"
 
 
+def _replace_githook_block(existing: str, block: str) -> str | None:
+    """Swap the marked SafeGit block for ``block``; ``None`` if the markers are unpaired.
+
+    Everything outside the markers (the user's own hook lines) is kept as is,
+    so a re-install upgrades an older SafeGit block instead of skipping it.
+    """
+    start = existing.find(GITHOOK_MARKER)
+    end_marker = GITHOOK_MARKER.replace(">>>", "<<<")
+    end = existing.find(end_marker, start)
+    if start < 0 or end < 0:
+        return None
+    end += len(end_marker)
+    if existing[end:end + 1] == "\n":
+        end += 1
+    return existing[:start] + block + existing[end:]
+
+
 def _install_githooks(args: argparse.Namespace, cwd: str) -> int:
     repo = os.path.abspath(args.repo or cwd)
     state = gitstate.probe(repo, timeout=float(args.timeout), git_executable=args.git)
@@ -1209,9 +1243,11 @@ def _install_githooks(args: argparse.Namespace, cwd: str) -> int:
     if not hooks_dir.is_dir():
         hooks_dir = pathlib.Path(repo) / ".git" / "hooks"
     target = hooks_dir / "pre-commit"
-    block = '%s\nexec %s preflight --repo "$(git rev-parse --show-toplevel)" --strict\n%s\n' % (
+    pinned = " ".join(_sh_word(word) for word in _pinned_policy_args(repo))
+    block = '%s\nexec %s preflight --repo "$(git rev-parse --show-toplevel)" --strict %s\n%s\n' % (
         GITHOOK_MARKER,
         _sh_hook_command_prefix(),
+        pinned,
         GITHOOK_MARKER.replace(">>>", "<<<"),
     )
     existing = ""
@@ -1221,7 +1257,19 @@ def _install_githooks(args: argparse.Namespace, cwd: str) -> int:
         except OSError:
             existing = ""
     if GITHOOK_MARKER in existing:
-        sys.stdout.write("SafeGit pre-commit hook already installed at %s\n" % target)
+        updated = _replace_githook_block(existing, block)
+        if updated is None or updated == existing:
+            sys.stdout.write("SafeGit pre-commit hook already installed at %s\n" % target)
+            return 0
+        if not args.write:
+            sys.stdout.write("SafeGit install (dry run) - update git pre-commit hook\n")
+            sys.stdout.write("target: %s\n" % target)
+            sys.stdout.write("--- replacement block ---\n%s\n" % block)
+            sys.stdout.write("Re-run with --write to apply.\n")
+            return 0
+        with open(target, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(updated)
+        sys.stdout.write("updated SafeGit pre-commit hook at %s\n" % target)
         return 0
     if existing.strip() and not args.force:
         return _fail(

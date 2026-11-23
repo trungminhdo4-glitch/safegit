@@ -15,6 +15,13 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   replaced the pinned ruleset. `install` now also writes `--pinned`, which
   makes `--policy`/`--profile` binding. **Re-run `safegit install` for existing
   Claude Code and OpenCode hooks.**
+* The git `pre-commit` hook (`install githooks`) pinned no policy at all, so
+  the commit gate followed `SAFEGIT_POLICY` and policy discovery at commit
+  time. It now pins `--policy`/`--profile` with `--pinned` too, quoted and with
+  forward slashes for `sh`. Re-run `safegit install githooks`, and again after
+  adding or moving a policy: a re-install now replaces an existing SafeGit
+  block in place (other hook lines are kept) instead of reporting "already
+  installed" and leaving the old block untouched.
 * `install` no longer pins the builtin default when the found or named policy
   is missing or invalid; it refuses with `POLICY_NOT_FOUND` /
   `POLICY_JSON_INVALID`.
