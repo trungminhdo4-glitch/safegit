@@ -118,6 +118,21 @@ class RuleRegressionTests(unittest.TestCase):
                     rule, gitop.RULE_NON_DESTRUCTIVE, "%r -> %s" % (command, rule)
                 )
 
+    def test_checkout_create_branch_is_non_destructive(self) -> None:
+        # "git checkout -b NAME" consumed NAME as the option value, left no
+        # positional and fell through to git.other (UNKNOWN), so the most
+        # common branch-creation command was denied in hook mode.
+        for command in ("git checkout -b new-branch", "git checkout -q -b new-branch"):
+            self.assertEqual(
+                self.rules(command), [gitop.RULE_NON_DESTRUCTIVE], command
+            )
+
+    def test_checkout_force_create_branch_is_not_waved_through(self) -> None:
+        # -B resets an existing branch; it must not ride along with -b.
+        self.assertNotIn(
+            gitop.RULE_NON_DESTRUCTIVE, self.rules("git checkout -B existing")
+        )
+
     def test_pull_rebase_is_a_rebase(self) -> None:
         self.assertIn(gitop.RULE_REBASE, self.rules("git pull --rebase"))
 
@@ -265,6 +280,18 @@ class EngineRegressionTests(unittest.TestCase):
         decision = self.decide("git checkout main")
         self.assertEqual(decision.verdict, ALLOW)
         self.assertEqual(decision.findings[0].rule_id, "git.checkout.switch")
+
+    def test_checkout_create_branch_is_allowed_without_a_human(self) -> None:
+        pathlib.Path(self.repo, "src", "app.py").write_text(
+            "print('dirty')\n", encoding="utf-8"
+        )
+        decision = engine.evaluate(
+            "Bash",
+            {"command": "git checkout -b feature/new", "cwd": self.repo},
+            ctx=self.context(),
+            non_interactive=True,
+        )
+        self.assertEqual(decision.verdict, ALLOW, decision.to_dict())
 
     def test_checkout_of_directory_with_local_changes_is_denied(self) -> None:
         pathlib.Path(self.repo, "src", "app.py").write_text(
