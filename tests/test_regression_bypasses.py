@@ -133,6 +133,34 @@ class RuleRegressionTests(unittest.TestCase):
             gitop.RULE_NON_DESTRUCTIVE, self.rules("git checkout -B existing")
         )
 
+    def test_branch_force_reset_is_a_ref_write(self) -> None:
+        # "switch -C" / "--force-create" resets an existing branch exactly like
+        # "checkout -B"; it was waved through as "switch creates a branch".
+        for command in (
+            "git switch -C existing",
+            "git switch -C existing origin/main",
+            "git switch --force-create existing",
+            "git switch --force-create=existing",
+            "git switch --force-cr existing",
+            "git switch -qC existing",
+            "git switch -q -C existing HEAD~3",
+            "git checkout -B existing",
+            "git checkout -B existing origin/main",
+            "git checkout -qB existing",
+            "git checkout -q -B existing HEAD~3",
+        ):
+            rules = self.rules(command)
+            self.assertIn(gitop.RULE_REF_WRITE, rules, command)
+            self.assertNotIn(gitop.RULE_NON_DESTRUCTIVE, rules, command)
+
+    def test_branch_create_without_force_stays_non_destructive(self) -> None:
+        for command in (
+            "git switch -c new-branch",
+            "git switch --create=new-branch",
+            "git checkout -b new-branch",
+        ):
+            self.assertEqual(self.rules(command), [gitop.RULE_NON_DESTRUCTIVE], command)
+
     def test_pull_rebase_is_a_rebase(self) -> None:
         self.assertIn(gitop.RULE_REBASE, self.rules("git pull --rebase"))
 
@@ -292,6 +320,25 @@ class EngineRegressionTests(unittest.TestCase):
             non_interactive=True,
         )
         self.assertEqual(decision.verdict, ALLOW, decision.to_dict())
+
+    def test_branch_force_reset_of_existing_branch_is_not_allowed(self) -> None:
+        git(self.repo, "branch", "existing")
+        for command in (
+            "git switch -C existing",
+            "git switch --force-create=existing",
+            "git switch -qC existing main",
+            "git checkout -B existing main",
+        ):
+            for non_interactive in (False, True):
+                decision = engine.evaluate(
+                    "Bash",
+                    {"command": command, "cwd": self.repo},
+                    ctx=self.context(),
+                    non_interactive=non_interactive,
+                )
+                self.assertNotEqual(
+                    decision.verdict, ALLOW, f"{command} -> {decision.to_dict()}"
+                )
 
     def test_checkout_of_directory_with_local_changes_is_denied(self) -> None:
         pathlib.Path(self.repo, "src", "app.py").write_text(
