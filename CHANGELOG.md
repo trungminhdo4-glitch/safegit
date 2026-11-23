@@ -6,6 +6,25 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Security
+
+* Installed hooks could be redirected by the environment. When no policy
+  file existed at install time the hook was pinned to `--profile default`,
+  but `--profile` is only a fallback, so a `SAFEGIT_POLICY` or
+  `SAFEGIT_POLICY_DIR` set later (or a policy file dropped on the search path)
+  replaced the pinned ruleset. `install` now also writes `--pinned`, which
+  makes `--policy`/`--profile` binding. **Re-run `safegit install` for existing
+  Claude Code and OpenCode hooks.**
+* `install` no longer pins the builtin default when the found or named policy
+  is missing or invalid; it refuses with `POLICY_NOT_FOUND` /
+  `POLICY_JSON_INVALID`.
+
+### Fixed
+
+* The Claude Code hook command quotes pinned paths that contain whitespace
+  (for example a home folder `C:\Users\<first last>`), which previously broke every
+  hook call, and refuses pinned paths with shell metacharacters.
+
 ### Added
 
 * `safegit audit --verdict ALLOW|DENY|REQUIRE_OWNER|UNKNOWN` filters both

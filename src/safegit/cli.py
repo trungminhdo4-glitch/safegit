@@ -92,6 +92,7 @@ def _load_policy(args: argparse.Namespace, start_dir: str) -> policy_module.Poli
         getattr(args, "policy", None),
         profile=getattr(args, "profile", None),
         start_dir=start_dir,
+        discover=not getattr(args, "pinned", False),
     )
 
 
@@ -946,7 +947,7 @@ def _hook_command_prefix() -> str:
 def _command_word(word: str) -> str:
     """Quote one pinned argument for a hook command line the host runs in a shell.
 
-    A path with a space (``C:\\Users\\Jane Doe\\...``) would otherwise split
+    A path with a space (``C:\\Users\\<first last>\\...``) would otherwise split
     into several arguments; shell metacharacters are refused outright, the
     same rule :func:`_hook_command_prefix` applies to the interpreter path.
     """
@@ -994,6 +995,8 @@ def _pinned_args(cwd: str) -> list[str]:
     else:
         policy_module.load(resolved)
         args.extend(["--policy", str(resolved)])
+    # --profile alone is only a fallback; --pinned makes it binding.
+    args.append("--pinned")
     args.extend(["--approval-store", str(approvals.default_store_path())])
     return args
 
@@ -1256,6 +1259,14 @@ def build_parser() -> argparse.ArgumentParser:
     def add_policy_flags(target: argparse.ArgumentParser) -> None:
         target.add_argument("--policy", help="path to safegit.policy.json")
         target.add_argument("--profile", help="built-in profile when no policy file exists")
+        target.add_argument(
+            "--pinned",
+            action="store_true",
+            help=(
+                "use exactly --policy or --profile; ignore SAFEGIT_POLICY, "
+                "SAFEGIT_POLICY_DIR and policy discovery (set by 'install')"
+            ),
+        )
         target.add_argument(
             "--timeout",
             type=float,

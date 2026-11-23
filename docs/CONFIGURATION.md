@@ -20,6 +20,9 @@ A policy that is requested explicitly or discovered but cannot be read, parsed
 or validated is an **error** (exit 70 in CLI mode, exit 2 in hook mode). It
 never degrades into a weaker policy.
 
+`--pinned` (written by `safegit install`) skips steps 2 to 5: only the given
+`--policy`, or else the `--profile`, is used.
+
 ```bash
 safegit policy init --profile strict     # write a starting point
 safegit policy validate                  # exit 0 = valid, exit 1 = invalid
@@ -253,7 +256,7 @@ become readable on disk):
 
 | Variable | Purpose | Trusted in hook mode? |
 | --- | --- | --- |
-| `SAFEGIT_POLICY`, `SAFEGIT_POLICY_DIR` | Policy location | No: the installed hook pins `--policy`, which wins |
+| `SAFEGIT_POLICY`, `SAFEGIT_POLICY_DIR` | Policy location | No: the installed hook pins `--policy` (or `--profile default` when no policy existed) together with `--pinned`, which skips both variables and policy discovery |
 | `SAFEGIT_APPROVAL_STORE` | Approval store | No: the installed hook pins `--approval-store` |
 | `SAFEGIT_AUDIT_PATH` | Audit log location | Only when the policy does not set a path; pin the policy to disable it |
 | `SAFEGIT_CLI` | Interpreter used by the OpenCode plugin | No: the plugin is generated with an absolute argv |

@@ -511,6 +511,7 @@ def load(
     profile: str | None = None,
     start_dir: str | pathlib.Path | None = None,
     allow_builtin_default: bool = True,
+    discover: bool = True,
 ) -> Policy:
     """Load and validate a policy.
 
@@ -524,8 +525,15 @@ def load(
       the built-in default profile is used and the result records
       ``<builtin:default>`` as its source, so the audit log shows which
       ruleset produced a decision.
+
+    ``discover=False`` is the pinned mode of installed hooks: neither the
+    ``SAFEGIT_POLICY`` / ``SAFEGIT_POLICY_DIR`` environment variables nor a
+    policy file found on disk can replace the pinned ``path`` or ``profile``.
     """
-    resolved = resolve_policy_path(path, start_dir=start_dir)
+    if discover:
+        resolved = resolve_policy_path(path, start_dir=start_dir)
+    else:
+        resolved = pathlib.Path(path) if path else None
     if resolved is None:
         if profile:
             return from_dict(

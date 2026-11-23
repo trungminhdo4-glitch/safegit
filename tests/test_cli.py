@@ -478,6 +478,54 @@ class InstallTests(CliHarness):
         self.assertIn("--policy %s" % policy_path, command)
         self.assertNotIn("--profile", command)
 
+    def test_pinned_profile_ignores_a_policy_from_the_environment(self) -> None:
+        # A hook installed while no policy file existed is pinned to the
+        # builtin profile; a SAFEGIT_POLICY set later must not redirect it.
+        other = pathlib.Path(self.root) / "other.policy.json"
+        code, _, err = self.run_cli(["policy", "init", "--path", str(other)])
+        self.assertEqual(code, 0, err)
+        pinned = cli.build_parser().parse_args(
+            ["hook", "claude", "--pinned", "--profile", "default"]
+        )
+        unpinned = cli.build_parser().parse_args(["hook", "claude", "--profile", "default"])
+        with mock.patch.dict(os.environ, {"SAFEGIT_POLICY": str(other)}):
+            self.assertEqual(cli._load_policy(pinned, self.root).source_path, "<builtin:default>")
+            # Without --pinned the documented lookup order is unchanged.
+            self.assertEqual(cli._load_policy(unpinned, self.root).source_path, str(other))
+
+    def test_pinned_policy_path_is_still_loaded_fail_closed(self) -> None:
+        missing = os.path.join(self.root, "gone.policy.json")
+        args = cli.build_parser().parse_args(["hook", "claude", "--pinned", "--policy", missing])
+        with self.assertRaises(cli.policy_module.PolicyError):
+            cli._load_policy(args, self.root)
+
+    def test_install_pins_hooks_against_environment_redirection(self) -> None:
+        settings = pathlib.Path(self.root) / ".claude" / "settings.json"
+        code, _, err = self.run_cli(
+            ["install", "claude", "--dir", self.root, "--settings", str(settings), "--write"]
+        )
+        self.assertEqual(code, 0, err)
+        command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0][
+            "hooks"
+        ][0]["command"]
+        self.assertIn(" --pinned", command)
+        code, _, err = self.run_cli(["install", "opencode", "--dir", self.root, "--write"])
+        self.assertEqual(code, 0, err)
+        content = (pathlib.Path(self.root) / ".opencode" / "plugins" / "safegit.js").read_text(
+            encoding="utf-8"
+        )
+        pinned_line = next(
+            line for line in content.splitlines() if line.startswith("const SAFEGIT_PINNED_ARGS")
+        )
+        self.assertIn("--pinned", json.loads(pinned_line.split("=", 1)[1]))
+
+    def test_pinned_claude_hook_still_allows_a_safe_command(self) -> None:
+        code, out, err = self.run_cli(
+            self.base("hook", "claude", "--pinned", "--profile", "default"),
+            json.dumps(self.claude_pretooluse),
+        )
+        self.assertEqual((code, out, err), (0, "", ""))
+
     def test_claude_install_quotes_a_pinned_path_with_spaces(self) -> None:
         policy_dir = pathlib.Path(self.root) / "Jane Doe"
         policy_dir.mkdir()
