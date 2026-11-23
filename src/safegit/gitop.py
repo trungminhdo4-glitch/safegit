@@ -999,6 +999,8 @@ def classify_all(invocation: GitInvocation) -> list[GitOp]:
             flags, "-c", "-C", "--create", "--force-create"
         ):
             add(RULE_NON_DESTRUCTIVE, detail="switch creates a branch")
+        elif subcommand == "checkout" and _flag_present(flags, "-b"):
+            add(RULE_NON_DESTRUCTIVE, detail="checkout -b creates a branch")
 
     elif subcommand == "restore":
         staged_only = _flag_present(flags, "--staged") and not _flag_present(
