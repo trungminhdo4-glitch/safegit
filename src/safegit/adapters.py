@@ -31,7 +31,20 @@ COMMAND_TOOLS: dict[str, str] = {
     "command": "command",
     "bashcommand": "command",
     "runshellcommand": "command",
+    "powershell": "command",
+    "pwsh": "command",
 }
+
+_POWERSHELL_TOOLS = frozenset({"powershell", "pwsh"})
+
+
+def shell_dialect(tool_name: str) -> str:
+    """The shell dialect a command tool runs its command string in."""
+    from . import shellparse
+
+    if _key(tool_name) in _POWERSHELL_TOOLS:
+        return shellparse.DIALECT_POWERSHELL
+    return shellparse.DIALECT_BASH
 
 FILE_WRITE_TOOLS: dict[str, str] = {
     "write": "write",

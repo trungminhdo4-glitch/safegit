@@ -719,5 +719,186 @@ class EngineRegressionTests(unittest.TestCase):
             os.chdir(previous)
 
 
+ENCODED_HARD_RESET = "ZwBpAHQAIAByAGUAcwBlAHQAIAAtAC0AaABhAHIAZAA="  # UTF-16LE base64
+
+
+class PowerShellIndirectionTests(unittest.TestCase):
+    """PowerShell spellings of a destructive git call, for both shell tools.
+
+    Each dangerous command below runs ``git reset --hard`` (or makes it
+    impossible to tell) in PowerShell or bash; none may come out as ALLOW.
+    The benign list pins the everyday commands that must keep passing.
+    """
+
+    DANGEROUS = (
+        "Start-Process git -ArgumentList 'reset','--hard'",
+        "Start-Process git -ArgumentList 'reset', '--hard' -Wait -NoNewWindow",
+        "Start-Process -FilePath git -ArgumentList 'reset --hard'",
+        "saps git 'reset','--hard'",
+        "start git reset --hard",
+        "Start-Process pwsh -ArgumentList '-c','git reset --hard'",
+        "Start-Process $exe 'reset','--hard'",
+        "iex 'git reset --hard'",
+        'Invoke-Expression "git reset --hard"',
+        "Invoke-Expression -Command 'git reset --hard'",
+        '"git reset --hard" | iex',
+        "iex $cmd",
+        'pwsh -c "iex \'git reset --hard\'"',
+        'pwsh -NonInteractive -Command "git reset --hard"',
+        'powershell -ExecutionPolicy Bypass -Command "git reset --hard"',
+        "powershell /Command 'git reset --hard'",
+        "pwsh -EncodedCommand " + ENCODED_HARD_RESET,
+        "pwsh -enc " + ENCODED_HARD_RESET,
+        "pwsh -ec not-base64!",
+        'echo "git reset --hard" | pwsh -Command -',
+        'powershell -Command "pwsh -c \'& { git reset --hard }\'"',
+        "& { git reset --hard }",
+        ". { git reset --hard }",
+        "&{git reset --hard}",
+        "Invoke-Command { git reset --hard }",
+        "Invoke-Command -ScriptBlock { git reset --hard }",
+        "icm { git reset --hard }",
+        "Start-Job { git reset --hard }",
+        "if ($true) { git reset --hard }",
+        "foreach ($x in 1) { git reset --hard }",
+        "'reset --hard' | % { git $_.Split(' ') }",
+        "while (git reset --hard) { break }",
+        "$null = git reset --hard",
+        "$out = (git reset --hard)",
+        "Write-Output @(git reset --hard)",
+        "[scriptblock]::Create('git reset --hard').Invoke()",
+        "$ExecutionContext.InvokeCommand.InvokeScript('git reset --hard')",
+        "$sb = [scriptblock]::Create($s); $sb.Invoke()",
+        "$p = [powershell]::Create().AddScript('git reset --hard').Invoke()",
+        "& (Get-Command git) reset --hard",
+        "$g = 'git'; & $g reset --hard",
+        "git reset $env:MODE",
+        "git reset $MODE",
+        'git reset "${MODE}"',
+        "$a = @('reset','--hard'); git @a",
+        "git reset `--hard",
+        "git `reset --hard",
+        "(git reset --hard)",
+        "{ git reset --hard; }",
+        "if true; then git reset --hard; fi",
+        "for x in 1; do git reset --hard; done",
+    )
+
+    BENIGN = (
+        "git status",
+        "& git status",
+        "git log --oneline -5",
+        "git diff | Out-File d.txt",
+        "Get-ChildItem",
+        "Get-Content README.md",
+        "npm test",
+        'Write-Host "git reset --hard is dangerous"',
+        "echo 'git reset --hard'",
+        'Select-String -Pattern "reset --hard" -Path *.md',
+        "Start-Process notepad",
+        "iex 'Get-Date'",
+        'pwsh -c "git status"',
+        "pwsh -NoProfile -Command 'Get-ChildItem | Where-Object { $_.Length -gt 0 }'",
+        "(cd src && npm test)",
+        'git commit -m "fix $thing"',
+        "git log -g HEAD@{1}",
+        'git log --format="%H %s"',
+        "find . -name '*.py' -exec wc -l {} \\;",
+        "awk '{print $1}' README.md",
+    )
+
+    # PowerShell syntax: in bash "$_" or "$f" at the start of a group would
+    # run a command named by a variable, so only the PowerShell tool may
+    # treat these as expressions.
+    BENIGN_POWERSHELL_ONLY = (
+        "$sha = git rev-parse HEAD; Write-Output $sha",
+        "$env:CI = '1'; npm test",
+        "if ($LASTEXITCODE -ne 0) { Write-Error 'failed' }",
+        "foreach ($f in Get-ChildItem) { Write-Output $f.Name }",
+        "Get-ChildItem | ForEach-Object { $_.Name }",
+        "Get-ChildItem | Where-Object { $_.Length -gt 0 } | Select-Object Name",
+        'pwsh -NoProfile -Command "Get-ChildItem | Where-Object { `$_.Length -gt 0 }"',
+        'Write-Host "Path: $env:PATH"',
+        "& git status",
+        "& 'C:\\Program Files\\Git\\cmd\\git.exe' status",
+        "git add README.md; git commit -m \"docs: $($env:USERNAME) notes\"",
+    )
+
+    def setUp(self) -> None:
+        EngineRegressionTests.setUp(self)  # type: ignore[arg-type]
+        pathlib.Path(self.repo, "src", "app.py").write_text(
+            "print('dirty')\n", encoding="utf-8"
+        )
+
+    _restore_audit_env = EngineRegressionTests._restore_audit_env
+    context = EngineRegressionTests.context
+
+    def verdict(self, tool: str, command: str) -> str:
+        decision = engine.evaluate(
+            tool,
+            {"command": command, "cwd": self.repo},
+            ctx=self.context(),
+            non_interactive=True,
+        )
+        return decision.verdict
+
+    def test_indirect_destructive_commands_are_never_allowed(self) -> None:
+        for tool in ("Bash", "PowerShell"):
+            for command in self.DANGEROUS:
+                with self.subTest(tool=tool, command=command):
+                    self.assertNotEqual(self.verdict(tool, command), ALLOW)
+
+    def test_powershell_escape_rules_are_its_own(self) -> None:
+        # In PowerShell the backslash escapes nothing: "a\;" ends a statement.
+        for command in (
+            "echo a\\; git reset --hard",
+            'echo "a\\"; git reset --hard',
+            "pwsh -c $payload",
+            "Start-Process -FilePath $exe -ArgumentList 'reset','--hard'",
+        ):
+            with self.subTest(command=command):
+                self.assertNotEqual(self.verdict("PowerShell", command), ALLOW)
+
+    def test_everyday_commands_stay_allowed(self) -> None:
+        for tool in ("Bash", "PowerShell"):
+            for command in self.BENIGN:
+                with self.subTest(tool=tool, command=command):
+                    self.assertEqual(self.verdict(tool, command), ALLOW)
+        for command in self.BENIGN_POWERSHELL_ONLY:
+            with self.subTest(tool="PowerShell", command=command):
+                self.assertEqual(self.verdict("PowerShell", command), ALLOW)
+
+    def test_resolved_indirection_names_the_real_operation(self) -> None:
+        # When the nested command is resolvable it is classified as itself,
+        # not just as "could not parse".
+        for command in (
+            "Start-Process git -ArgumentList 'reset','--hard'",
+            "iex 'git reset --hard'",
+            "pwsh -enc " + ENCODED_HARD_RESET,
+            "& { git reset --hard }",
+            "git reset `--hard",
+        ):
+            decision = engine.evaluate(
+                "PowerShell",
+                {"command": command, "cwd": self.repo},
+                ctx=self.context(),
+                non_interactive=True,
+            )
+            with self.subTest(command=command):
+                self.assertIn(
+                    gitop.RULE_RESET_HARD,
+                    [finding.rule_id for finding in decision.findings],
+                )
+
+    def test_powershell_tool_is_a_known_command_tool(self) -> None:
+        decision = engine.evaluate(
+            "PowerShell",
+            {"command": "npm test", "cwd": self.repo},
+            ctx=self.context(),
+            non_interactive=True,
+        )
+        self.assertNotIn("TOOL_NAME_INFERRED_AS_COMMAND", decision.limitations)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1264,7 +1264,9 @@ def evaluate(
             limitations.extend(extra)
             continue
 
-        parsed = shellparse.parse(action.command)
+        parsed = shellparse.parse(
+            action.command, adapters.shell_dialect(action.tool_name)
+        )
         state = _state_for(ctx, _action_dir(ctx, action.cwd))
         evidence["repo"] = state.to_dict()
         if parsed.unknown_reasons:
@@ -1296,6 +1298,20 @@ def evaluate(
             continue
 
         for invocation in invocations:
+            if invocation.dynamic_args:
+                # "git reset $MODE" is whatever $MODE holds at run time.
+                limitations.append("DYNAMIC_GIT_ARGUMENT")
+                all_findings.append(
+                    Finding(
+                        rule_id="command.parse",
+                        verdict=UNKNOWN,
+                        reason_code=REASON_UNKNOWN_PARSE,
+                        message="git argument only known at run time: "
+                        + ", ".join(invocation.dynamic_args)[:200],
+                        action=invocation.describe(),
+                        evidence={"dynamic_args": list(invocation.dynamic_args)},
+                    )
+                )
             invocation_dir = _action_dir(ctx, action.cwd)
             if invocation.cwd_hint:
                 hint = invocation.cwd_hint

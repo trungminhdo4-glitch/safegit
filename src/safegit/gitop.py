@@ -555,6 +555,9 @@ class GitInvocation:
     env_assignments: tuple[tuple[str, str], ...]
     raw: str
     nested_depth: int
+    # Arguments only known at run time ($VAR, $(...), @splat), message
+    # values excepted: the classification cannot rely on them.
+    dynamic_args: tuple[str, ...] = ()
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -670,6 +673,7 @@ def resolve_invocations(parsed: shellparse.ParseResult) -> list[GitInvocation]:
         rest, extra = _split_global_options(list(command.argv[1:]))
         if not rest:
             continue
+        dynamic = list(command.dynamic) or [False] * len(command.argv)
         invocations.append(
             GitInvocation(
                 tokens=tuple(rest),
@@ -680,9 +684,45 @@ def resolve_invocations(parsed: shellparse.ParseResult) -> list[GitInvocation]:
                 env_assignments=command.env_assignments,
                 raw=command.raw,
                 nested_depth=command.nested_depth,
+                dynamic_args=_dynamic_args(command.argv, dynamic, rest),
             )
         )
     return invocations
+
+
+# Subcommands whose -m/--message value is free text: a variable there
+# changes the message, never the operation.
+_MESSAGE_SUBCOMMANDS = frozenset({"commit", "tag", "stash", "notes", "merge"})
+
+
+def _dynamic_args(
+    argv: tuple[str, ...], dynamic: list[bool], rest: list[str]
+) -> tuple[str, ...]:
+    """Return the run-time-only arguments of one git command line."""
+    if len(dynamic) != len(argv):
+        return ()
+    offset = len(argv) - len(rest)
+    found: list[str] = []
+    for index in range(1, len(argv)):
+        if not dynamic[index]:
+            continue
+        if index >= offset and rest and rest[0] in _MESSAGE_SUBCOMMANDS:
+            previous = argv[index - 1]
+            token = argv[index]
+            if (
+                previous in ("-m", "--message")
+                or token.startswith("--message=")
+                or (
+                    previous.startswith("-")
+                    and not previous.startswith("--")
+                    and previous.endswith("m")
+                    and index - 1 >= offset + 1
+                )
+                or (token.startswith("-m") and not token.startswith("--"))
+            ):
+                continue
+        found.append(argv[index])
+    return tuple(found)
 
 
 def _parse_flags(
